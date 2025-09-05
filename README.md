@@ -60,6 +60,12 @@ dependencies.)
 ```shell
 pip install -e ".[mediapipe]" -f wheels/
 ```
+RKW NOTE 1: Install libdfx from the following source and then run the above mediapipe install
+```shell
+pip install https://s3.us-east-2.amazonaws.com/nuralogix-assets/dfx-sdk/python/libdfx-4.14.6-py3-none-win_amd64.whl
+```
+RKW Note 2: download the following facemask file and put it in the "res" folder 
+https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/latest/face_landmarker.task
 
 Note: Please see the section [Using Dlib](#using-dlib) for an alternative.
 
@@ -76,6 +82,11 @@ to make a measurement.)
 
 ```shell
 dfxdemo org register <your_license_key>
+```
+
+RKW Note 3: for demo server use the following flag
+```shell
+dfxdemo org register <your_license_key> --rest-url https://model1-api.na-east.research.deepaffex.ai
 ```
 
 **Note**: By default, the demo stores tokens in a file called `config.json`.
@@ -148,7 +159,10 @@ List your historical measurements
 ```shell
 dfxdemo measurements list
 ```
-
+RKW Note 4: Run with an IR camera
+```shell
+dfxdemo measure make_camera --infrared --camera 1 --virtual 564x682@30 -md 120
+```
 ---
 
 ## Additional instructions for developers in China

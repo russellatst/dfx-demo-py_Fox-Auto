@@ -320,10 +320,12 @@ async def main(args):
                 print("Failed to set user demographics because " + collector.getLastErrorMessage())
                 return
 
-        # Set the collector constraints config
+                # Set the collector constraints config
         if app.is_camera:
             app.constraints_cfg = DfxSdkHelpers.ConstraintsConfig(collector.getConstraintsConfig("json"))
             app.constraints_cfg.minimumFps = 10
+            app.constraints_cfg.boxWidth_pct = 100  # added this line RKW
+            app.constraints_cfg.boxHeight_pct = 100  # added this line RKW
             collector.setConstraintsConfig("json", str(app.constraints_cfg))
 
         # Print the enabled constraints
