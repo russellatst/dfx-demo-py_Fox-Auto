@@ -38,8 +38,6 @@ __XSize = 1120
 cTimeStamp = ctypes.c_uint16()
 Enable_L8 = False
 
-entronSDK = ctypes.CDLL(os.path.join(os.path.dirname(os.path.abspath(__file__)),DLLName))
-
 # Init the board
 __YSize = 1344
 __XSize = 1120
@@ -100,11 +98,12 @@ with pyvirtualcam.Camera(width=output_x, height=output_y, fps=set_framerate) as 
             frame_num_last = frame_num_current
 
             current_frame_time = time.time()
-            framerate_arr.append(1 / (current_frame_time - previous_frame_time))
-            previous_frame_time = current_frame_time
-            if framerate_arr.__len__() > 10:
-                average_framerate = np.average(framerate_arr)
-                framerate_arr = []
+            if current_frame_time != previous_frame_time:
+                framerate_arr.append(1 / (current_frame_time - previous_frame_time))
+                previous_frame_time = current_frame_time
+                if framerate_arr.__len__() > 10:
+                    average_framerate = np.average(framerate_arr)
+                    framerate_arr = []
 
             if bit_depth == 10:
                 image = np.frombuffer(frameBufferData, dtype=np.uint16).reshape((output_y, output_x))

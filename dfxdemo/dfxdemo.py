@@ -22,6 +22,8 @@ from dfxutils.prettyprint import PrettyPrinter as PP
 from dfxutils.renderer import NullRenderer, Renderer
 from dfxutils.sdkhelpers import DfxSdkHelpers
 
+changed_max_duration = 130
+
 FT_CHOICES = []
 try:
     from dfxutils.visage_tracker import VisageTracker
@@ -57,6 +59,7 @@ except Exception:
 async def main(args):
     # Load config
     config = load_config(args.config_file)
+    print(f"config file: {config}")
 
     # Check if alternate URL was passed
     if "rest_url" in args and args.rest_url is not None:
@@ -244,7 +247,8 @@ async def main(args):
                                         rotation=args.rotation,
                                         fps=args.fps,
                                         use_video_timestamps=args.use_video_timestamps,
-                                        max_seconds_to_process=120)
+                                        max_seconds_to_process=changed_max_duration)
+                                        #max_seconds_to_process=120)
 
             # Open the demographics file if provided
             if args.demographics is not None:
@@ -367,8 +371,9 @@ async def main(args):
             print(f"Could not determine chunk duration from payloads; using {args.chunk_duration_s}s, "
                   "override using --chunk_duration")
             duration_pr = args.chunk_duration_s
-        if duration_pr * app.number_chunks > 120:
-            print(f"Total payload duration {duration_pr * app.number_chunks} seconds is more than 120 seconds")
+        #if duration_pr * app.number_chunks > 120:
+        if duration_pr * app.number_chunks > changed_max_duration:
+            print(f"Total payload duration {duration_pr * app.number_chunks} seconds is more than {changed_max_duration} seconds")
             return
         app.chunk_duration_s = int(duration_pr)
 
@@ -815,6 +820,10 @@ async def extract_from_imgs(chunk_queue, imreader, tracker, collector, renderer,
             channelOrder = dfxsdk.ChannelOrder.CHANNEL_ORDER_INFRARED888
 
     # Read frames from the image source, track faces and extract using collector
+    # Adding a variable to automatically start the measurements if a face is found for a while
+    consecutive_frames_of_face = 0
+    fps = 30
+    time_to_start_in_sec = 10
     while True:
         # Grab a frame
         read, image, frame_number, frame_timestamp_ns = await imreader.read_next_frame()
@@ -837,6 +846,13 @@ async def extract_from_imgs(chunk_queue, imreader, tracker, collector, renderer,
 
         # Track faces
         tracked_faces = tracker.trackFaces(image, frame_number, frame_timestamp_ns / 1000000.0)
+        # start counting consecutive frames witha face
+        if(app.step == MeasurementStep.READY) & (len(tracked_faces) > 0) & os.path():
+            consecutive_frames_of_face += 1
+            if (consecutive_frames_of_face > fps * 10):
+                app.step = MeasurementStep.USER_STARTED
+        else:
+            consecutive_frames_of_face = 0
 
         # Create a DFX VideoFrame, then a DFX Frame from the DFX VideoFrame and add DFX faces to it
         dfx_video_frame = dfxsdk.VideoFrame(image, frame_number, frame_timestamp_ns, channelOrder)
