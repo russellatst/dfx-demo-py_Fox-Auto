@@ -56,10 +56,33 @@ except Exception:
     _version = ""
 
 
+start_1_path = "start1"
+start_2_path = "start2"
+start_txt = "start"
+process_limit_txt = "process_limit"
+error_txt = "error"
+process_limit_num = 80
+message_dir = os.path.join(os.path.abspath("."), "messages")
+
+
+def write_message(message, app_num):
+    f = open(os.path.join(message_dir,start_txt+str(app_num)),"w")
+    f.close()
+
+
+def check_flag_status(flag_num):
+    ret_val = True
+    if flag_num == 1:
+        ret_val = os.path.exists(start_1_path)
+    elif flag_num == 2:
+        ret_val = os.path.exists(start_2_path)
+    return ret_val
+
+
 async def main(args):
     # Load config
     config = load_config(args.config_file)
-    print(f"config file: {config}")
+    print(f"Messages Directory: f{message_dir}")
 
     # Check if alternate URL was passed
     if "rest_url" in args and args.rest_url is not None:
@@ -372,6 +395,9 @@ async def main(args):
                   "override using --chunk_duration")
             duration_pr = args.chunk_duration_s
         #if duration_pr * app.number_chunks > 120:
+        if (duration_pr * app.number_chunks > process_limit_num) & not(os.path.exists(os.path.join(message_dir, process_limit_txt+str(args.flagnum)))):
+            write_message(process_limit_txt, args.flagnum)
+
         if duration_pr * app.number_chunks > changed_max_duration:
             print(f"Total payload duration {duration_pr * app.number_chunks} seconds is more than {changed_max_duration} seconds")
             return
@@ -435,7 +461,8 @@ async def main(args):
                     tracker,  # Face tracker
                     collector,  # DFX SDK collector needed to create chunks
                     renderer,  # Rendering
-                    app)  # App
+                    app,  # App
+                    int(args.flag_num)) # start flag number
             else:  # args.subcommand == "debug_make_from_chunks":
                 renderer = NullRenderer()
                 produce_chunks_coro = read_folder_chunks(chunk_queue, payload_files, meta_files, prop_files,
@@ -807,7 +834,8 @@ async def retrieve_sdk_config(headers, config, config_file, sdk_id):
         return base64.standard_b64decode(config["study_cfg_data"])
 
 
-async def extract_from_imgs(chunk_queue, imreader, tracker, collector, renderer, app):
+async def extract_from_imgs(chunk_queue, imreader, tracker, collector, renderer, app, flag_num = 0):
+    print(f"flag_num is {flag_num}")
     # Set channel order based on is_infrared, is_camera and virtual
     channelOrder = dfxsdk.ChannelOrder.CHANNEL_ORDER_BGR
     if app.is_infrared:
@@ -847,7 +875,7 @@ async def extract_from_imgs(chunk_queue, imreader, tracker, collector, renderer,
         # Track faces
         tracked_faces = tracker.trackFaces(image, frame_number, frame_timestamp_ns / 1000000.0)
         # start counting consecutive frames witha face
-        if(app.step == MeasurementStep.READY) & (len(tracked_faces) > 0) & os.path():
+        if(app.step == MeasurementStep.READY) & (len(tracked_faces) > 0) & check_flag_status(flag_num):
             consecutive_frames_of_face += 1
             if (consecutive_frames_of_face > fps * 10):
                 app.step = MeasurementStep.USER_STARTED
@@ -963,6 +991,7 @@ def cmdline():
         action="version",
         version=f"%(prog)s{' (headless) ' if cv2.version.headless else ''} {_version} (libdfx v{dfxsdk.__version__})")
     parser.add_argument("-c", "--config_file", help="Path to config file", default="./config.json")
+    parser.add_argument("-f", "--flag_num", help="Start number either 1 or 2", default=0)
     pp_group = parser.add_mutually_exclusive_group()
     pp_group.add_argument("--json", help="Print as JSON", action="store_true", default=False)
     pp_group.add_argument("--csv", help="Print grids as CSV", action="store_true", default=False)
