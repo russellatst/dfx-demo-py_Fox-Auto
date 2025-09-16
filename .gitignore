@@ -178,3 +178,10 @@ Scripts/pythonw.exe
 Scripts/ttx.exe
 Scripts/wheel.exe
 share/man/man1/ttx.1
+start_demo1.bat
+start_demo2.bat
+/messages
+first_setup.bat
+start_demo1.bat
+start_demo2.bat
+test _cam.py

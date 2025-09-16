@@ -4,11 +4,13 @@ import cv2
 
 start_txt = "start"
 process_limit_txt = "process_limit"
+measuring_in_progress_txt = "measuring_in_progress"
 error_txt = "error"
+end_process_txt = "end"
 active_app = 1
 inactive_app = 2
 message_dir = os.path.join(os.path.abspath("."), "messages")
-cam = cv2.VideoCapture(2)
+cam = cv2.VideoCapture(1)
 
 def _draw_text(msg, render_image, origin, fs=None, fg=None, bg=None, THICK=None):
     FONT = cv2.FONT_HERSHEY_SIMPLEX
@@ -34,7 +36,7 @@ def set_active_process(app_num):
     inactive_app = (app_num % 2) + 1
 
 def write_message(message, app_num):
-    f = open(os.path.join(message_dir,start_txt+str(app_num)),"w")
+    f = open(os.path.join(message_dir,message+str(app_num)),"w")
     f.close()
 
 
@@ -46,22 +48,33 @@ def display_result(app_num):
     k = cv2.waitKey(1) & 0xFF
     return k
 
+def clear_messages():
+    print("Removing all messages")
+    files = os.listdir(message_dir)
+    for f in files:
+        os.remove(os.path.join(message_dir, f))
+    
 
+clear_messages()
 p1=Popen("start_demo1.bat")
 p2=Popen("start_demo2.bat")
 set_active_process(1)
 write_message(start_txt, active_app)
-while(not(os.path.exists(os.path.join(message_dir, process_limit_txt+str(active_app)))
-          or
-          os.paht.exists(os.path.join(message_dir, error_txt + str(active_app))))):
-    k = display_result(active_app)
-os.remove(start_txt+str(active_app))
-write_message(start_txt, inactive_app)
-#############################################
-########### NEED TO ADD SOME WAIT LOGIC HERE
-#############################################
-set_active_process(2)
-while(not(os.path.exists(os.path.join(message_dir, process_limit_txt+str(active_app)))
-          or
-          os.paht.exists(os.path.join(message_dir, error_txt + str(active_app))))):
-    k = display_result(active_app)
+exit_flag = False
+while not exit_flag:
+    while(not(os.path.exists(os.path.join(message_dir, error_txt + str(active_app))))):
+        k = display_result(active_app)
+        if os.path.exists(os.path.join(message_dir, process_limit_txt+str(active_app))):
+            os.remove(os.path.join(message_dir,start_txt+str(active_app)))
+            write_message(start_txt, inactive_app)
+        if os.path.exists(os.path.join(message_dir, message_dir+str(inactive_app))):
+            break
+    #############################################
+    ########### NEED TO ADD SOME WAIT LOGIC HERE
+    #############################################
+    set_active_process(inactive_app)
+    write_message(end_process_txt, inactive_app)
+    #while(not(os.path.exists(os.path.join(message_dir, process_limit_txt+str(active_app)))
+    #        or
+    #        os.paht.exists(os.path.join(message_dir, error_txt + str(active_app))))):
+    #    k = display_result(active_app)

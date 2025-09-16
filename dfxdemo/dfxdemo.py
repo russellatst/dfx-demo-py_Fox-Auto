@@ -60,22 +60,30 @@ start_1_path = "start1"
 start_2_path = "start2"
 start_txt = "start"
 process_limit_txt = "process_limit"
+measuring_in_progress_txt = "measuring_in_progress"
 error_txt = "error"
+end_process_txt = "end"
 process_limit_num = 80
 message_dir = os.path.join(os.path.abspath("."), "messages")
 
 
 def write_message(message, app_num):
-    f = open(os.path.join(message_dir,start_txt+str(app_num)),"w")
+    f = open(os.path.join(message_dir,message+str(app_num)),"w")
+    print(f"WROTE: {os.path.join(message_dir,message+str(app_num))}")
     f.close()
 
 
 def check_flag_status(flag_num):
     ret_val = True
     if flag_num == 1:
-        ret_val = os.path.exists(start_1_path)
+        ret_val = os.path.exists(os.path.join(message_dir, start_1_path))
     elif flag_num == 2:
-        ret_val = os.path.exists(start_2_path)
+        ret_val = os.path.exists(os.path.join(message_dir, start_2_path))
+    return ret_val
+
+
+def is_end_message(flag_num):
+    ret_val = os.path.exists(os.path.join(message_dir, end_process_txt+str(flag_num)))
     return ret_val
 
 
@@ -395,7 +403,7 @@ async def main(args):
                   "override using --chunk_duration")
             duration_pr = args.chunk_duration_s
         #if duration_pr * app.number_chunks > 120:
-        if (duration_pr * app.number_chunks > process_limit_num) & not(os.path.exists(os.path.join(message_dir, process_limit_txt+str(args.flagnum)))):
+        if not (os.path.exists(os.path.join(message_dir, process_limit_txt+str(args.flagnum)))) and (duration_pr * app.number_chunks > process_limit_num) :
             write_message(process_limit_txt, args.flagnum)
 
         if duration_pr * app.number_chunks > changed_max_duration:
@@ -496,6 +504,10 @@ async def main(args):
                     # Update data needed to check for completion
                     app.number_chunks_sent += 1
                     app.last_chunk_sent = action == 'LAST::PROCESS'
+
+                    ##### RKW make sure the next process gets queued
+                    if app.number_chunks_sent == 3:
+                        write_message(process_limit_txt, args.flag_num)
 
                     # Save chunk (for debugging purposes)
                     if "debug_save_chunks_folder" in args and args.debug_save_chunks_folder:
@@ -874,9 +886,10 @@ async def extract_from_imgs(chunk_queue, imreader, tracker, collector, renderer,
 
         # Track faces
         tracked_faces = tracker.trackFaces(image, frame_number, frame_timestamp_ns / 1000000.0)
-        # start counting consecutive frames witha face
+        # RKW start counting consecutive frames witha face
         if(app.step == MeasurementStep.READY) & (len(tracked_faces) > 0) & check_flag_status(flag_num):
             consecutive_frames_of_face += 1
+            write_message(measuring_in_progress_txt, flag_num)
             if (consecutive_frames_of_face > fps * 10):
                 app.step = MeasurementStep.USER_STARTED
         else:
@@ -930,6 +943,11 @@ async def extract_from_imgs(chunk_queue, imreader, tracker, collector, renderer,
             elif result == dfxsdk.CollectorState.ERROR:
                 app.step = MeasurementStep.FAILED
                 reasons = "Failed because " + dfxsdk.Collector.getLastErrorMessage()
+
+        # RKW end if there is an end message
+        if is_end_message(flag_num):
+            os.remove(os.path.join(message_dir, end_process_txt+str(flag_num)))
+            app.step = MeasurementStep.USER_CANCELLED
 
         await renderer.put_nowait((image, (dfx_frame, frame_number, frame_timestamp_ns)))
 
