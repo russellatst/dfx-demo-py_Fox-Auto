@@ -63,8 +63,14 @@ process_limit_txt = "process_limit"
 measuring_in_progress_txt = "measuring_in_progress"
 error_txt = "error"
 end_process_txt = "end"
+process_limit_reached = False
 process_limit_num = 80
 message_dir = os.path.join(os.path.abspath("."), "messages")
+
+
+def write_shm_message(shm, event, text):
+    shm.buf[:text.__len__()] = bytearray(text, 'utf-8')
+    event.set()
 
 
 def write_message(message, app_num):
@@ -72,20 +78,10 @@ def write_message(message, app_num):
     print(f"WROTE: {os.path.join(message_dir,message+str(app_num))}")
     f.close()
 
-
-def check_flag_status(flag_num):
-    ret_val = True
-    if flag_num == 1:
-        ret_val = os.path.exists(os.path.join(message_dir, start_1_path))
-    elif flag_num == 2:
-        ret_val = os.path.exists(os.path.join(message_dir, start_2_path))
-    return ret_val
-
-
-def is_end_message(flag_num):
-    ret_val = os.path.exists(os.path.join(message_dir, end_process_txt+str(flag_num)))
-    return ret_val
-
+def get_status_message(shm):
+    s = str(bytes(shm.buf[:]).decode()).replace("\x00", "")
+    shm.buf[:] = bytearray(shm.buf.nbytes)
+    return 
 
 async def main(args):
     # Load config
@@ -403,8 +399,9 @@ async def main(args):
                   "override using --chunk_duration")
             duration_pr = args.chunk_duration_s
         #if duration_pr * app.number_chunks > 120:
-        if not (os.path.exists(os.path.join(message_dir, process_limit_txt+str(args.flagnum)))) and (duration_pr * app.number_chunks > process_limit_num) :
+        if not process_limit_reached and (duration_pr * app.number_chunks > process_limit_num) :
             write_message(process_limit_txt, args.flagnum)
+            process_limit_reached = True
 
         if duration_pr * app.number_chunks > changed_max_duration:
             print(f"Total payload duration {duration_pr * app.number_chunks} seconds is more than {changed_max_duration} seconds")
@@ -469,8 +466,8 @@ async def main(args):
                     tracker,  # Face tracker
                     collector,  # DFX SDK collector needed to create chunks
                     renderer,  # Rendering
-                    app,  # App
-                    int(args.flag_num)) # start flag number
+                    app  # App
+                    )
             else:  # args.subcommand == "debug_make_from_chunks":
                 renderer = NullRenderer()
                 produce_chunks_coro = read_folder_chunks(chunk_queue, payload_files, meta_files, prop_files,
@@ -504,10 +501,6 @@ async def main(args):
                     # Update data needed to check for completion
                     app.number_chunks_sent += 1
                     app.last_chunk_sent = action == 'LAST::PROCESS'
-
-                    ##### RKW make sure the next process gets queued
-                    if app.number_chunks_sent == 3:
-                        write_message(process_limit_txt, args.flag_num)
 
                     # Save chunk (for debugging purposes)
                     if "debug_save_chunks_folder" in args and args.debug_save_chunks_folder:
@@ -573,7 +566,7 @@ async def main(args):
                 print(f"Use 'dfxdemo measure get' to get comprehensive results")
 
 ### RKW making a slimmed down run version
-async def run_measurements(config_file, camera_num, md, app_num):
+async def run_measurements(config_file, camera_num, md, app_num, status_shm, hr_shm, start_event, status_event, hr_event, coordinator_shm):
     # Load config
     config = load_config(config_file)
 
@@ -759,7 +752,11 @@ async def run_measurements(config_file, camera_num, md, app_num):
                     collector,  # DFX SDK collector needed to create chunks
                     renderer,  # Rendering
                     app,  # App
-                    int(app_num)) # start flag number
+                    hr_shm, # HR messages
+                    hr_event, # New HR event
+                    start_event, # Flag of when to start
+                    coordinator_shm # messages from coordinator
+                    ) 
             else:  # args.subcommand == "debug_make_from_chunks":
                 renderer = NullRenderer()
                 produce_chunks_coro = read_folder_chunks(chunk_queue, payload_files, meta_files, prop_files,
@@ -795,8 +792,9 @@ async def run_measurements(config_file, camera_num, md, app_num):
                     app.last_chunk_sent = action == 'LAST::PROCESS'
 
                     ##### RKW make sure the next process gets queued
-                    if app.number_chunks_sent == 3:
-                        write_message(process_limit_txt, app_num)
+                    if app.number_chunks_sent == 2:
+                        write_shm_message(status_shm, status_event, process_limit_txt)
+                        print("DEBUG: Process limit sent")
 
                     chunk_queue.task_done()
 
@@ -829,9 +827,12 @@ async def run_measurements(config_file, camera_num, md, app_num):
 
                 cancelled = await renderer.render()
                 cv2.destroyAllWindows()
+                status_shm.buf[:error_txt.__len__()] = error_txt
+                status_event.set()
                 if cancelled:
                     tracker.stop()
                     raise ValueError("Measurement was cancelled by user.")
+                    
 
             # Wrap the coroutines in tasks, start them and wait till they finish
             tasks = [
@@ -1130,8 +1131,7 @@ async def retrieve_sdk_config(headers, config, config_file, sdk_id):
         return base64.standard_b64decode(config["study_cfg_data"])
 
 
-async def extract_from_imgs(chunk_queue, imreader, tracker, collector, renderer, app, flag_num = 0):
-    print(f"flag_num is {flag_num}")
+async def extract_from_imgs(chunk_queue, imreader, tracker, collector, renderer, app, hrm_shm, hr_event, start_event, coordinator_shm):
     # Set channel order based on is_infrared, is_camera and virtual
     channelOrder = dfxsdk.ChannelOrder.CHANNEL_ORDER_BGR
     if app.is_infrared:
@@ -1148,6 +1148,7 @@ async def extract_from_imgs(chunk_queue, imreader, tracker, collector, renderer,
     consecutive_frames_of_face = 0
     fps = 30
     time_to_start_in_sec = 10
+    hr_event.set()
     while True:
         # Grab a frame
         read, image, frame_number, frame_timestamp_ns = await imreader.read_next_frame()
@@ -1171,10 +1172,11 @@ async def extract_from_imgs(chunk_queue, imreader, tracker, collector, renderer,
         # Track faces
         tracked_faces = tracker.trackFaces(image, frame_number, frame_timestamp_ns / 1000000.0)
         # RKW start counting consecutive frames witha face
-        if(app.step == MeasurementStep.READY) & (len(tracked_faces) > 0) & check_flag_status(flag_num):
+        if(app.step == MeasurementStep.READY) and (len(tracked_faces) > 0) and start_event.is_set():
             consecutive_frames_of_face += 1
-            write_message(measuring_in_progress_txt, flag_num)
+            # write_message(measuring_in_progress_txt, flag_num)
             if (consecutive_frames_of_face > fps * 10):
+                start_event.clear()
                 app.step = MeasurementStep.USER_STARTED
         else:
             consecutive_frames_of_face = 0
@@ -1229,8 +1231,8 @@ async def extract_from_imgs(chunk_queue, imreader, tracker, collector, renderer,
                 reasons = "Failed because " + dfxsdk.Collector.getLastErrorMessage()
 
         # RKW end if there is an end message
-        if is_end_message(flag_num):
-            os.remove(os.path.join(message_dir, end_process_txt+str(flag_num)))
+        if start_event.is_set() and get_status_message(coordinator_shm) == end_process_txt:
+            start_event.clear()
             app.step = MeasurementStep.USER_CANCELLED
 
         await renderer.put_nowait((image, (dfx_frame, frame_number, frame_timestamp_ns)))
@@ -1293,7 +1295,7 @@ def cmdline():
         action="version",
         version=f"%(prog)s{' (headless) ' if cv2.version.headless else ''} {_version} (libdfx v{dfxsdk.__version__})")
     parser.add_argument("-c", "--config_file", help="Path to config file", default="./config.json")
-    parser.add_argument("-f", "--flag_num", help="Start number either 1 or 2", default=0)
+    #parser.add_argument("-f", "--flag_num", help="Start number either 1 or 2", default=0)
     pp_group = parser.add_mutually_exclusive_group()
     pp_group.add_argument("--json", help="Print as JSON", action="store_true", default=False)
     pp_group.add_argument("--csv", help="Print grids as CSV", action="store_true", default=False)
@@ -1516,5 +1518,8 @@ def exec_run(config_file, camera_num, md, app_num):
     asyncio.run(run_measurements)
 
 
+
+
 if __name__ == '__main__':
-    cmdline()
+    #cmdline()
+    run_measurements
