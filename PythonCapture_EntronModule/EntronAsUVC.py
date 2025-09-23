@@ -42,6 +42,8 @@ Enable_L8 = False
 __YSize = 1344
 __XSize = 1120
 
+_DISPLAY = True
+
 entronSDK = ctypes.CDLL(os.path.join(os.path.dirname(os.path.abspath(__file__)),DLLName))
 
 ## Run the init function
@@ -112,30 +114,31 @@ with pyvirtualcam.Camera(width=output_x, height=output_y, fps=set_framerate) as 
             image = cv2.cvtColor(image, cv2.COLOR_GRAY2RGB)
             cam.send(image)
             cam.sleep_until_next_frame()
-            image = cv.resize(image, (0, 0), fx=0.5, fy=0.5)
+            if _DISPLAY:
+                image = cv.resize(image, (0, 0), fx=0.5, fy=0.5)
 
-            c, r = 2, 15
-            r = _draw_text(f"Current framerate: {average_framerate:.2f} FPS", image, (c, r))
-            r = _draw_text(f"{dropped_frame_count} frames dropped", image, (c, r))
-            r = _draw_text(f"Time since last dropped frame: {(time.time() - last_dropped_frame_time):.1f}", image, (c, r))
-            r = _draw_text(f"LED Status: {enable_led}", image,
-                           (c, r))
-            r = _draw_text(f"Exposure mode: {exposure_mode}", image,
-                           (c, r))
+                c, r = 2, 15
+                r = _draw_text(f"Current framerate: {average_framerate:.2f} FPS", image, (c, r))
+                r = _draw_text(f"{dropped_frame_count} frames dropped", image, (c, r))
+                r = _draw_text(f"Time since last dropped frame: {(time.time() - last_dropped_frame_time):.1f}", image, (c, r))
+                r = _draw_text(f"LED Status: {enable_led}", image,
+                            (c, r))
+                r = _draw_text(f"Exposure mode: {exposure_mode}", image,
+                            (c, r))
 
-            cv2.imshow('image stream', image)
-            key = cv2.waitKey(1) & 0xFF
-            if key == ord('q'):
-                entronSDK.module_stop()
-                entronSDK.module_deinit()
-                cv2.destroyAllWindows()
-                exit()
-            elif key == ord('l'):
-                enable_led = not(enable_led)
-                entronSDK.module_setIllumination(enable_led)
-            elif key == ord('s'):
-                exposure_mode = int(not(exposure_mode))
-                entronSDK.module_setExposure(exposure_mode, 1,1)
+                cv2.imshow('image stream', image)
+                key = cv2.waitKey(1) & 0xFF
+                if key == ord('q'):
+                    entronSDK.module_stop()
+                    entronSDK.module_deinit()
+                    cv2.destroyAllWindows()
+                    exit()
+                elif key == ord('l'):
+                    enable_led = not(enable_led)
+                    entronSDK.module_setIllumination(enable_led)
+                elif key == ord('s'):
+                    exposure_mode = int(not(exposure_mode))
+                    entronSDK.module_setExposure(exposure_mode, 1,1)
 
         except Exception as err:
             entronSDK.module_stop()

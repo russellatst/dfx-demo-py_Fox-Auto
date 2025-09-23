@@ -63,6 +63,7 @@ process_limit_txt = "process_limit"
 measuring_in_progress_txt = "measuring_in_progress"
 error_txt = "error"
 end_process_txt = "end"
+initialzied_txt = "initialized"
 process_limit_reached = False
 process_limit_num = 80
 message_dir = os.path.join(os.path.abspath("."), "messages")
@@ -321,6 +322,7 @@ async def main(args):
         factory.setMode("discrete")
         collector = factory.createCollector()
         if collector.getCollectorState() == dfxsdk.CollectorState.ERROR:
+            print("A DEBUG")
             print(f"DFX collector creation failed: {collector.getLastErrorMessage()}")
             return
 
@@ -348,6 +350,7 @@ async def main(args):
         if app.demographics is not None:
             print("    Setting user demographics:")
             if not DfxSdkHelpers.set_user_demographics(collector, app.demographics):
+                print("B DEBUG")
                 print("Failed to set user demographics because " + collector.getLastErrorMessage())
                 return
 
@@ -566,9 +569,11 @@ async def main(args):
                 print(f"Use 'dfxdemo measure get' to get comprehensive results")
 
 ### RKW making a slimmed down run version
-async def run_measurements(config_file, camera_num, md, app_num, status_shm, hr_shm, start_event, status_event, hr_event, coordinator_shm):
+async def run_measurements(config_file, camera_num, md, app_num, status_shm, hr_shm, start_event, status_event, hr_event, coordinator_shm,seconds_to_wait_before_starting):
     # Load config
     config = load_config(config_file)
+
+    first_status = True
 
     # Check API status
     async with aiohttp.ClientSession(raise_for_status=True) as session:
@@ -658,6 +663,7 @@ async def run_measurements(config_file, camera_num, md, app_num, status_shm, hr_
     factory.setMode("discrete")
     collector = factory.createCollector()
     if collector.getCollectorState() == dfxsdk.CollectorState.ERROR:
+        print("C DEBUG")
         print(f"DFX collector creation failed: {collector.getLastErrorMessage()}")
         return
 
@@ -687,6 +693,7 @@ async def run_measurements(config_file, camera_num, md, app_num, status_shm, hr_
     if app.demographics is not None:
         print("    Setting user demographics:")
         if not DfxSdkHelpers.set_user_demographics(collector, app.demographics):
+            print("D DEBUG")
             print("Failed to set user demographics because " + collector.getLastErrorMessage())
             return
 
@@ -752,10 +759,13 @@ async def run_measurements(config_file, camera_num, md, app_num, status_shm, hr_
                     collector,  # DFX SDK collector needed to create chunks
                     renderer,  # Rendering
                     app,  # App
+                    status_shm,
+                    status_event,
                     hr_shm, # HR messages
                     hr_event, # New HR event
                     start_event, # Flag of when to start
-                    coordinator_shm # messages from coordinator
+                    coordinator_shm, # messages from coordinator
+                    seconds_to_wait_before_starting
                     ) 
             else:  # args.subcommand == "debug_make_from_chunks":
                 renderer = NullRenderer()
@@ -792,7 +802,7 @@ async def run_measurements(config_file, camera_num, md, app_num, status_shm, hr_
                     app.last_chunk_sent = action == 'LAST::PROCESS'
 
                     ##### RKW make sure the next process gets queued
-                    if app.number_chunks_sent == 2:
+                    if app.number_chunks_sent == 14:
                         write_shm_message(status_shm, status_event, process_limit_txt)
                         print("DEBUG: Process limit sent")
 
@@ -804,13 +814,30 @@ async def run_measurements(config_file, camera_num, md, app_num, status_shm, hr_
             # Coroutine to receive responses using the Websocket
             async def receive_results():
                 num_results_received = 0
+                valid_results = 0
                 async for msg in ws:
                     status, request_id, payload = dfxapi.Measurements.ws_decode(msg)
                     if request_id == results_request_id:
                         json_result = json.loads(payload)
                         result = DfxSdkHelpers.json_result_to_dict(json_result)
                         renderer.set_results(result.copy())
+                        # THIS IS WHERE THE HR COMES OUT
+                        begin_ind = payload.find("HR_IR_CONT_BPM")
+                        current_hr = payload[begin_ind + 25:begin_ind + 31]
+                        print(f"Payload:\{current_hr}/")
+                        try:
+                            int(current_hr)
+                            if valid_results == 0:
+                                write_shm_message(status_shm,status_event,measuring_in_progress_txt)
+                                first_status = False
+                            write_shm_message(hr_shm,hr_event,current_hr)
+                            valid_results +=1
+                            print("the above is payload")
+                        except Exception as e:
+                            print("No payload yet")
+                            print(e)
                         print(payload) if False else PP.print_sdk_result(result)
+                        
                         num_results_received += 1
                     # We are done if the last chunk is sent and number of results received equals number of chunks sent
                     if app.last_chunk_sent and num_results_received == app.number_chunks_sent:
@@ -827,10 +854,10 @@ async def run_measurements(config_file, camera_num, md, app_num, status_shm, hr_
 
                 cancelled = await renderer.render()
                 cv2.destroyAllWindows()
-                status_shm.buf[:error_txt.__len__()] = error_txt
-                status_event.set()
                 if cancelled:
                     tracker.stop()
+                    write_shm_message(status_shm,status_event,error_txt)
+                    print("error sent from demo")
                     raise ValueError("Measurement was cancelled by user.")
                     
 
@@ -1131,7 +1158,7 @@ async def retrieve_sdk_config(headers, config, config_file, sdk_id):
         return base64.standard_b64decode(config["study_cfg_data"])
 
 
-async def extract_from_imgs(chunk_queue, imreader, tracker, collector, renderer, app, hrm_shm, hr_event, start_event, coordinator_shm):
+async def extract_from_imgs(chunk_queue, imreader, tracker, collector, renderer, app, status_shm, status_event, hrm_shm, hr_event, start_event, coordinator_shm, sec_to_wait_before_starting):
     # Set channel order based on is_infrared, is_camera and virtual
     channelOrder = dfxsdk.ChannelOrder.CHANNEL_ORDER_BGR
     if app.is_infrared:
@@ -1147,8 +1174,7 @@ async def extract_from_imgs(chunk_queue, imreader, tracker, collector, renderer,
     # Adding a variable to automatically start the measurements if a face is found for a while
     consecutive_frames_of_face = 0
     fps = 30
-    time_to_start_in_sec = 10
-    hr_event.set()
+    write_shm_message(status_shm, status_event, initialzied_txt)
     while True:
         # Grab a frame
         read, image, frame_number, frame_timestamp_ns = await imreader.read_next_frame()
@@ -1174,8 +1200,8 @@ async def extract_from_imgs(chunk_queue, imreader, tracker, collector, renderer,
         # RKW start counting consecutive frames witha face
         if(app.step == MeasurementStep.READY) and (len(tracked_faces) > 0) and start_event.is_set():
             consecutive_frames_of_face += 1
-            # write_message(measuring_in_progress_txt, flag_num)
-            if (consecutive_frames_of_face > fps * 10):
+            # RKW where the process waits
+            if (consecutive_frames_of_face > fps * sec_to_wait_before_starting):
                 start_event.clear()
                 app.step = MeasurementStep.USER_STARTED
         else:
@@ -1225,9 +1251,12 @@ async def extract_from_imgs(chunk_queue, imreader, tracker, collector, renderer,
                 if result == dfxsdk.CollectorState.COMPLETED:
                     if app.is_camera:
                         imreader.stop()
+                        #RKW close the program if the chunks are found
+                    app.step = MeasurementStep.USER_CANCELLED
                     break
             elif result == dfxsdk.CollectorState.ERROR:
                 app.step = MeasurementStep.FAILED
+                print("E DEBUG")
                 reasons = "Failed because " + dfxsdk.Collector.getLastErrorMessage()
 
         # RKW end if there is an end message

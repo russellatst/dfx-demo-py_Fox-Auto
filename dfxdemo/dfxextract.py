@@ -123,6 +123,7 @@ async def main(args):
     factory.setMode("discrete")
     collector = factory.createCollector()
     if collector.getCollectorState() == dfxsdk.CollectorState.ERROR:
+        print("F DEBUG")
         print(f"DFX collector creation failed: {collector.getLastErrorMessage()}")
         return
 
@@ -150,6 +151,7 @@ async def main(args):
     if app.demographics is not None:
         print("    Setting user demographics:")
         if not DfxSdkHelpers.set_user_demographics(collector, app.demographics):
+            print("G DEBUG")
             print("Failed to set user demographics because " + collector.getLastErrorMessage())
             return
 
@@ -325,6 +327,7 @@ async def extract_from_imgs(chunk_queue, imreader, tracker, collector, renderer,
                     break
             elif result == dfxsdk.CollectorState.ERROR:
                 app.step = MeasurementStep.FAILED
+                print("H DEBUG")
                 reasons = "Failed because " + dfxsdk.Collector.getLastErrorMessage()
 
         await renderer.put_nowait((image, (dfx_frame, frame_number, frame_timestamp_ns)))
