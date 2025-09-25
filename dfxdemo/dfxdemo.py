@@ -22,6 +22,8 @@ from dfxutils.prettyprint import PrettyPrinter as PP
 from dfxutils.renderer import NullRenderer, Renderer
 from dfxutils.sdkhelpers import DfxSdkHelpers
 
+import pickle
+
 changed_max_duration = 130
 
 FT_CHOICES = []
@@ -569,7 +571,7 @@ async def main(args):
                 print(f"Use 'dfxdemo measure get' to get comprehensive results")
 
 ### RKW making a slimmed down run version
-async def run_measurements(config_file, camera_num, md, app_num, status_shm, hr_shm, start_event, status_event, hr_event, coordinator_shm,seconds_to_wait_before_starting):
+async def run_measurements(config_file, camera_num, md, app_num, status_shm, hr_shm, start_event, status_event, hr_event, coordinator_shm,seconds_to_wait_before_starting, landmark_shm, landmark_event):
     # Load config
     config = load_config(config_file)
 
@@ -761,8 +763,8 @@ async def run_measurements(config_file, camera_num, md, app_num, status_shm, hr_
                     app,  # App
                     status_shm,
                     status_event,
-                    hr_shm, # HR messages
-                    hr_event, # New HR event
+                    landmark_shm, # HR messages
+                    landmark_event, # New HR event
                     start_event, # Flag of when to start
                     coordinator_shm, # messages from coordinator
                     seconds_to_wait_before_starting
@@ -846,6 +848,9 @@ async def run_measurements(config_file, camera_num, md, app_num, status_shm, hr_
 
                 app.step = MeasurementStep.COMPLETED
                 print("Measurement complete")
+                write_shm_message(status_shm,status_event,error_txt)
+                app.step = MeasurementStep.USER_CANCELLED
+
 
             # Coroutine for rendering
             async def render():
@@ -1158,7 +1163,7 @@ async def retrieve_sdk_config(headers, config, config_file, sdk_id):
         return base64.standard_b64decode(config["study_cfg_data"])
 
 
-async def extract_from_imgs(chunk_queue, imreader, tracker, collector, renderer, app, status_shm, status_event, hrm_shm, hr_event, start_event, coordinator_shm, sec_to_wait_before_starting):
+async def extract_from_imgs(chunk_queue, imreader, tracker, collector, renderer, app, status_shm, status_event, landmark_shm, landmark_event, start_event, coordinator_shm, sec_to_wait_before_starting):
     # Set channel order based on is_infrared, is_camera and virtual
     channelOrder = dfxsdk.ChannelOrder.CHANNEL_ORDER_BGR
     if app.is_infrared:
@@ -1241,6 +1246,14 @@ async def extract_from_imgs(chunk_queue, imreader, tracker, collector, renderer,
         if app.step == MeasurementStep.MEASURING:
             collector.defineRegions(dfx_frame)
             result = collector.extractChannels(dfx_frame)
+            polygons = []
+            for faceID in dfx_frame.getFaceIdentifiers():
+                for regionID in dfx_frame.getRegionNames(faceID):
+                    if dfx_frame.getRegionIntProperty(faceID, regionID, "draw") != 0:
+                        polygons.append(dfx_frame.getRegionPolygon(faceID, regionID))
+            serialized_obj = pickle.dumps(polygons)
+            landmark_shm.buf[:len(serialized_obj)] = serialized_obj
+            landmark_event.set()
 
             # Grab a chunk and check if we are finished
             if result == dfxsdk.CollectorState.CHUNKREADY or result == dfxsdk.CollectorState.COMPLETED:
@@ -1252,16 +1265,29 @@ async def extract_from_imgs(chunk_queue, imreader, tracker, collector, renderer,
                     if app.is_camera:
                         imreader.stop()
                         #RKW close the program if the chunks are found
+                    print("Cancelling due to finish")
+                    write_shm_message(status_shm, status_event,end_process_txt)
                     app.step = MeasurementStep.USER_CANCELLED
                     break
             elif result == dfxsdk.CollectorState.ERROR:
+                print("Cancelling due to Error")
+                write_shm_message(status_shm,status_event,error_txt)
                 app.step = MeasurementStep.FAILED
                 print("E DEBUG")
                 reasons = "Failed because " + dfxsdk.Collector.getLastErrorMessage()
+                app.step = MeasurementStep.USER_CANCELLED
 
         # RKW end if there is an end message
         if start_event.is_set() and get_status_message(coordinator_shm) == end_process_txt:
             start_event.clear()
+            app.step = MeasurementStep.USER_CANCELLED
+        if app.step == MeasurementStep.FAILED:
+            print("Cancelling due to Error")
+            write_shm_message(status_shm,status_event,error_txt)
+            app.step = MeasurementStep.USER_CANCELLED
+        if app.step == MeasurementStep.COMPLETED:
+            print("oh no it completed")
+            write_shm_message(status_shm, status_event,end_process_txt)
             app.step = MeasurementStep.USER_CANCELLED
 
         await renderer.put_nowait((image, (dfx_frame, frame_number, frame_timestamp_ns)))

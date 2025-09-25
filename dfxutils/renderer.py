@@ -106,7 +106,6 @@ class Renderer():
                 rimage = cv2.resize(image, (0, 0), fx=self._sf, fy=self._sf, interpolation=cv2.INTER_AREA)
             else:
                 rimage = cv2.resize(image, (0, 0), fx=self._sf, fy=self._sf, interpolation=cv2.INTER_LINEAR)
-
             self._render_queue.put_nowait((rimage, meta))
         except asyncio.QueueFull:
             pass
@@ -129,6 +128,7 @@ class Renderer():
 
     def _draw_on_image(self, render_image, image_meta):
         dfxframe, frame_number, frame_timestamp_ns = image_meta
+        face_regions_found = False
         # Render the target_rect
         if self._app.constraints_cfg is not None:
             w = render_image.shape[1] * self._app.constraints_cfg.boxWidth_pct / 100
