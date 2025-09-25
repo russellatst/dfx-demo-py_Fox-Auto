@@ -23,7 +23,7 @@ error_str = "error"
 end_process_str = "end"
 initialzied_txt = "initialized"
 message_dir = os.path.join(os.path.abspath("."), "messages")
-_cam_num = 0 # 2 is the IR, 1 is back camera, 0 is front
+_cam_num = 2 # 2 is the IR, 1 is back camera, 0 is front
 cam = cv2.VideoCapture(_cam_num)
 
 class app_state(enum.Enum):
