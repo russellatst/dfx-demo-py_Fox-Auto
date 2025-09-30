@@ -46,6 +46,7 @@ class Renderer():
         self._sent_chunk = None
         self._timestamps_ns = deque(maxlen=11)
         self._last_frame_number = None
+        self._end_render = False
         if self._app.extract_only:
             for k in _message_state:
                 _message_state[k] = _message_state[k].replace("Measurement", "Extraction").replace("measure", "extract")
@@ -65,7 +66,7 @@ class Renderer():
                 self._draw_on_image(render_image_copy, meta)
                 cv2.imshow(f"dfxdemo {self._version}", render_image_copy)
                 k = cv2.waitKey(1)
-                if k in [ord('q'), 27]:
+                if (k in [ord('q'), 27]) or self._end_render:
                     cancelled = True
                     self._app.step = MeasurementStep.USER_CANCELLED
                     break
@@ -89,7 +90,7 @@ class Renderer():
             self._draw_on_image(render_image_copy, meta)
             cv2.imshow(f"dfxdemo {self._version}", render_image_copy)
             k = cv2.waitKey(1)
-            if k in [ord('q'), 27]:
+            if (k in [ord('q'), 27]) or self._end_render:
                 if self._app.step == MeasurementStep.WAITING_RESULTS:
                     self._app.step = MeasurementStep.USER_CANCELLED
                     cancelled = True
@@ -109,6 +110,9 @@ class Renderer():
             self._render_queue.put_nowait((rimage, meta))
         except asyncio.QueueFull:
             pass
+
+    def end_render(self):
+        self._end_render = True
 
     def keep_render_last_frame(self):
         self._rendering_last = True

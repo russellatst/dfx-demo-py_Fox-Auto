@@ -571,7 +571,7 @@ async def main(args):
                 print(f"Use 'dfxdemo measure get' to get comprehensive results")
 
 ### RKW making a slimmed down run version
-async def run_measurements(config_file, camera_num, md, app_num, status_shm, hr_shm, start_event, status_event, hr_event, coordinator_shm,seconds_to_wait_before_starting, landmark_shm, landmark_event):
+async def run_measurements(config_file, camera_num, md, app_num, status_shm, hr_shm, start_event, status_event, hr_event, coordinator_shm,seconds_to_wait_before_starting, landmark_shm, landmark_event, end_event):
     # Load config
     config = load_config(config_file)
 
@@ -864,6 +864,15 @@ async def run_measurements(config_file, camera_num, md, app_num, status_shm, hr_
                     write_shm_message(status_shm,status_event,error_txt)
                     print("error sent from demo")
                     raise ValueError("Measurement was cancelled by user.")
+                
+            async def end_process_listener():
+                while True:
+                    if end_event.is_set():
+                        end_event.clear()
+                        app.step = MeasurementStep.USER_CANCELLED
+                        renderer.end_render()
+                        raise ValueError("End event raised by user.")
+                    await asyncio.sleep(1)
                     
 
             # Wrap the coroutines in tasks, start them and wait till they finish
@@ -871,7 +880,8 @@ async def run_measurements(config_file, camera_num, md, app_num, status_shm, hr_
                 asyncio.create_task(produce_chunks_coro),
                 asyncio.create_task(send_chunks()),
                 asyncio.create_task(receive_results()),
-                asyncio.create_task(render())
+                asyncio.create_task(render()),
+                asyncio.create_task(end_process_listener())
             ]
             done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_EXCEPTION)
             for p in pending:  # If there were any pending coroutines, cancel them here...
@@ -884,10 +894,11 @@ async def run_measurements(config_file, camera_num, md, app_num, status_shm, hr_
                         # raise e  # Uncomment this to see a stack trace
                 print(f"Measurement {app.measurement_id} failed")
             else:
-                config["last_measurement"] = app.measurement_id
-                save_config(config, args.config_file)
-                print(f"Measurement {app.measurement_id} completed")
-                print(f"Use 'dfxdemo measure get' to get comprehensive results")
+                print("ending")
+                #config["last_measurement"] = app.measurement_id
+                #save_config(config, args.config_file)
+                #print(f"Measurement {app.measurement_id} completed")
+                #print(f"Use 'dfxdemo measure get' to get comprehensive results")
 
 
 def load_config(config_file):

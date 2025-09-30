@@ -34,7 +34,7 @@ class app_state(enum.Enum):
             TERMINATED = 4
 
 class HRM_Proc():
-    def __init__(self, status_shm, hr_shm, coordinator_shm, start_event, status_event, hr_event,app_num,landmark_shm,landmark_event):
+    def __init__(self, status_shm, hr_shm, coordinator_shm, start_event, status_event, hr_event,app_num,landmark_shm,landmark_event, end_event):
         self.status_shm = status_shm
         self.hr_shm = hr_shm
         self.start_event = start_event
@@ -46,6 +46,7 @@ class HRM_Proc():
         self.current_state = app_state.TERMINATED
         self.landmark_shm = landmark_shm
         self.landmark_event = landmark_event
+        self.end_event = end_event
     
     def run_worker(self,seconds_to_wait_before_starting):
         json_config_file = "config1.json"
@@ -57,7 +58,7 @@ class HRM_Proc():
                                                          self.app_num, self.status_shm, self.hr_shm, 
                                                          self.start_event, self.status_event, self.hr_event, 
                                                          self.coordinator_shm,seconds_to_wait_before_starting,
-                                                         self.landmark_shm, self.landmark_event))
+                                                         self.landmark_shm, self.landmark_event, self.end_event))
             self.current_state = app_state.INITIALIZING
         except Exception as e:
             raise e
@@ -77,8 +78,9 @@ class HRM_Proc():
     def stop_process(self):
         print(f"ENDING PROC {self.app_num}")
         try:
-            self.write_shm_message(self.coordinator_shm, self.start_event, end_process_str)
-            self.start_event.set()
+            #self.write_shm_message(self.coordinator_shm, self.start_event, end_process_str)
+            #self.start_event.set()
+            self.end_event.set()
             if self.proc != None:
                 self.proc.terminate()
                 self.proc = None
@@ -261,6 +263,7 @@ def gui_process(hr_shm, hr_event, status_shm, status_ready,landmark_shm_gui,land
     plt.ylabel("Heart Rate (BPM)")
     plt.xlabel("Measurment Number")
     hr_history_arr = [0,0,0,0,0]
+    last_polygons = None
     
     class gui_state(enum.Enum):
         INITIALIZING = 0,
@@ -284,20 +287,29 @@ def gui_process(hr_shm, hr_event, status_shm, status_ready,landmark_shm_gui,land
         status_shm.buf[:] = bytearray(status_shm.buf.nbytes)
         return s
     
-    def draw_frame(live_image,gstate,hr_txt):
+    def draw_polygons_mask(polygons, image):
+        image = cv2.flip(image, 1)
+        for polygon in polygons:
+            cv2.polylines(image, 
+                            [np.round(np.array(polygon) * multiplier).astype(int)],
+                        isClosed=True,
+                        color=(255, 255, 0),
+                        thickness=1,
+                        lineType=cv2.LINE_AA)
+        image = cv2.flip(image, 1)
+        return image
+    
+    def draw_frame(live_image,gstate,hr_txt, last_polygons):
         
         polygons = pickle.loads(landmark_shm_gui.buf[:]) if landmark_event_gui.is_set() else None
         
         if polygons is not None and len(polygons) > 1:
+            live_image = draw_polygons_mask(polygons, live_image)
             landmark_event_gui.clear()
-            live_image = cv2.flip(live_image, 1)
-            for polygon in polygons:
-                cv2.polylines(live_image, [np.round(np.array(polygon) * 1.6).astype(int)],
-                            isClosed=True,
-                            color=(255, 255, 0),
-                            thickness=1,
-                            lineType=cv2.LINE_AA)
-            live_image = cv2.flip(live_image, 1)
+            polygons = last_polygons
+        elif last_polygons is not None and len(last_polygons) > 1:
+            live_image = draw_polygons_mask(last_polygons, live_image)
+            last_polygons = None
 
         green = (0, 255, 0)
         yellow = (104, 232, 2444)
@@ -333,8 +345,10 @@ def gui_process(hr_shm, hr_event, status_shm, status_ready,landmark_shm_gui,land
     
     state = gui_state.INITIALIZING
     status_txt = "Initializing..."
+    hr_txt = "0 BPM"
     ret, frame = cam.read(0)
     frame = cv2.resize(frame, dsize=live_image_dim)
+    multiplier = 0.5 * np.mean([(frame.shape[0] / input_size[0]), (frame.shape[1] / input_size[1])])
     # Draw the permanent frame with the logos
     logos_y_offset = frame_offset_y
     logos_x_offset = int(np.mean(((2 * frame_offset_x) + frame.shape[1], output_x))) - int(project_banner.shape[1] / 2)
@@ -377,19 +391,19 @@ def gui_process(hr_shm, hr_event, status_shm, status_ready,landmark_shm_gui,land
 
     while True:
         display_frame = np.copy(blank_frame)
-        hr_txt = "0 BPM"
+        #hr_txt = "0 BPM"
         if hr_event.is_set():
              hr_txt = get_hr_message()[0:2] + " BPM"
              print(f"GUI received ->{status_txt}")
             
         frame = cv2.resize(frame, dsize=live_image_dim)
-        # frame = cv2.resize(frame, (0, 0), fx=multiplier, fy=multiplier)
-        draw_frame(frame, state, hr_txt)
+        draw_frame(frame, state, hr_txt, last_polygons)
         cv2.imshow("Result", display_frame)
         k = cv2.waitKey(1) & 0xFF
         if k == ord('q'):
             cv2.destroyAllWindows()
             write_shm_message(status_shm, status_ready, end_process_str)
+            cam.release()
             return 0
         ret, frame = cam.read()
     return 1
@@ -417,6 +431,10 @@ if __name__ == "__main__":
     start_event_1.clear()
     start_event_2 = multiprocessing.Event()
     start_event_2.clear()
+    end_event_1 = multiprocessing.Event()
+    end_event_1.clear()
+    end_event_2 = multiprocessing.Event()
+    end_event_2.clear()
     hr_ready_event_1 = multiprocessing.Event() # This event is sent from worker to coordinator to read a new HR
     hr_ready_event_1.clear()
     hr_ready_event_2 = multiprocessing.Event()
@@ -438,14 +456,15 @@ if __name__ == "__main__":
 
     # Establish worker processes
     set_active_process(1)
-    worker_1 = HRM_Proc(status_shm_1, hr_shm_1,coordinator_worker_shm_1,start_event_1,status_event_1,hr_ready_event_1,1,landmark_shm_gui, landmark_event_gui)
-    worker_2 = HRM_Proc(status_shm_2, hr_shm_2,coordinator_worker_shm_2,start_event_2,status_event_2,hr_ready_event_2,2,landmark_shm_gui, landmark_event_gui)
+    worker_1 = HRM_Proc(status_shm_1, hr_shm_1,coordinator_worker_shm_1,start_event_1,status_event_1,hr_ready_event_1,1,landmark_shm_gui, landmark_event_gui, end_event_1)
+    worker_2 = HRM_Proc(status_shm_2, hr_shm_2,coordinator_worker_shm_2,start_event_2,status_event_2,hr_ready_event_2,2,landmark_shm_gui, landmark_event_gui, end_event_2)
     worker_arr = [worker_1, worker_2]
-    #hr_coordinator_proc = Process(target=manage_hr_process, name="hr_proc", args=(worker_arr, hr_shm_gui, hr_ready_event_gui,landmark_shm_gui, landmark_event_gui))
-    #hr_coordinator_proc.start()
+    hr_coordinator_proc = Process(target=manage_hr_process, name="hr_proc", args=(worker_arr, hr_shm_gui, hr_ready_event_gui,landmark_shm_gui, landmark_event_gui))
+    hr_coordinator_proc.start()
     gui_process(hr_shm_gui,hr_ready_event_gui,status_shm_gui,status_event_gui,landmark_shm_gui,landmark_event_gui)
 
     print("-------ENDING DEMO---------")
+    hr_coordinator_proc.join()
     for worker in worker_arr:
         worker.stop_process()
     for shm in all_shm:
