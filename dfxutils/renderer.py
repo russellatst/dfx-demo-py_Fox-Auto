@@ -32,7 +32,7 @@ _message_state = {
 
 
 class Renderer():
-    def __init__(self, version, image_src_name, fps, app, sf=1.0):
+    def __init__(self, version, image_src_name, fps, app, sf=1.0, suppress=False):
         self._render_queue = asyncio.Queue(1)
         self._version = version
         self._image_src_name = image_src_name
@@ -47,6 +47,7 @@ class Renderer():
         self._timestamps_ns = deque(maxlen=11)
         self._last_frame_number = None
         self._end_render = False
+        self._suppress = suppress
         if self._app.extract_only:
             for k in _message_state:
                 _message_state[k] = _message_state[k].replace("Measurement", "Extraction").replace("measure", "extract")
@@ -61,19 +62,24 @@ class Renderer():
                 _, frame_number, frame_timestamp_ns = meta
                 if not self._rendering_last:
                     self._timestamps_ns.append(frame_timestamp_ns)
-
-                render_image_copy = np.copy(render_image)
-                self._draw_on_image(render_image_copy, meta)
-                cv2.imshow(f"dfxdemo {self._version}", render_image_copy)
-                k = cv2.waitKey(1)
-                if (k in [ord('q'), 27]) or self._end_render:
-                    cancelled = True
-                    self._app.step = MeasurementStep.USER_CANCELLED
-                    break
-                if self._app.step == MeasurementStep.READY and k in [ord('s'), ord(' ')]:
-                    self._app.step = MeasurementStep.USER_STARTED
-                elif self._app.step == MeasurementStep.FAILED and k in [ord('r')]:
-                    self._app.step = MeasurementStep.NOT_READY
+                if not self._suppress:
+                    render_image_copy = np.copy(render_image)
+                    self._draw_on_image(render_image_copy, meta)
+                    cv2.imshow(f"dfxdemo {self._version}", render_image_copy)
+                    k = cv2.waitKey(1)
+                    if (k in [ord('q'), 27]) or self._end_render:
+                        cancelled = True
+                        self._app.step = MeasurementStep.USER_CANCELLED
+                        break
+                    if self._app.step == MeasurementStep.READY and k in [ord('s'), ord(' ')]:
+                        self._app.step = MeasurementStep.USER_STARTED
+                    elif self._app.step == MeasurementStep.FAILED and k in [ord('r')]:
+                        self._app.step = MeasurementStep.NOT_READY
+                else:
+                    if self._end_render:
+                        cancelled = True
+                        self._app.step = MeasurementStep.USER_CANCELLED
+                        break
             except asyncio.QueueEmpty:
                 pass
             finally:
@@ -85,16 +91,21 @@ class Renderer():
         # Keep rendering the last frame at 10fps as we display results
         while self._rendering_last:
             await asyncio.sleep(0.1)
-
-            render_image_copy = np.copy(render_image)
-            self._draw_on_image(render_image_copy, meta)
-            cv2.imshow(f"dfxdemo {self._version}", render_image_copy)
-            k = cv2.waitKey(1)
-            if (k in [ord('q'), 27]) or self._end_render:
-                if self._app.step == MeasurementStep.WAITING_RESULTS:
-                    self._app.step = MeasurementStep.USER_CANCELLED
+            if not self._suppress:
+                render_image_copy = np.copy(render_image)
+                self._draw_on_image(render_image_copy, meta)
+                cv2.imshow(f"dfxdemo {self._version}", render_image_copy)
+                k = cv2.waitKey(1)
+                if (k in [ord('q'), 27]) or self._end_render:
+                    if self._app.step == MeasurementStep.WAITING_RESULTS:
+                        self._app.step = MeasurementStep.USER_CANCELLED
+                        cancelled = True
+                    break
+            else:
+                if self._end_render:
                     cancelled = True
-                break
+                    self._app.step = MeasurementStep.USER_CANCELLED
+                    break
 
         return cancelled
 

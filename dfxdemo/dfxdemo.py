@@ -571,7 +571,7 @@ async def main(args):
                 print(f"Use 'dfxdemo measure get' to get comprehensive results")
 
 ### RKW making a slimmed down run version
-async def run_measurements(config_file, camera_num, md, app_num, status_shm, hr_shm, start_event, status_event, hr_event, coordinator_shm,seconds_to_wait_before_starting, landmark_shm, landmark_event, end_event):
+async def run_measurements(config_file, camera_num, md, app_num, status_shm, hr_shm, start_event, status_event, hr_event, coordinator_shm,seconds_to_wait_before_starting, landmark_shm, landmark_event, end_event,suppress):
     # Load config
     config = load_config(config_file)
 
@@ -597,6 +597,8 @@ async def run_measurements(config_file, camera_num, md, app_num, status_shm, hr_
         if new_config is not None:
             save_config(new_config, config_file)
         if not renewed:
+            print("!!!!!!!!!!")
+            write_shm_message(status_shm, status_event,error_txt)
             return
 
     # Handle "measure" (Measurements) commands - "make" and "debug_make_from_chunks"
@@ -748,7 +750,8 @@ async def run_measurements(config_file, camera_num, md, app_num, status_shm, hr_
                     image_src_name,
                     30,
                     app,
-                    0.5 #if imreader.height >= 720 else 1.0,
+                    0.5, #if imreader.height >= 720 else 1.0,
+                    suppress=suppress
                 ) if app.is_camera or not headless else NullRenderer()
                 if not app.is_camera:
                     print("Extraction started")
@@ -827,14 +830,14 @@ async def run_measurements(config_file, camera_num, md, app_num, status_shm, hr_
                         begin_ind = payload.find("HR_IR_CONT_BPM")
                         current_hr = payload[begin_ind + 25:begin_ind + 31]
                         print(f"Payload:\{current_hr}/")
-                        try:
-                            int(current_hr)
-                            if valid_results == 0:
+                        if valid_results == 0:
                                 write_shm_message(status_shm,status_event,measuring_in_progress_txt)
                                 first_status = False
+                        try:
+                            int(current_hr)
                             write_shm_message(hr_shm,hr_event,current_hr)
                             valid_results +=1
-                            print("the above is payload")
+                            #print("the above is payload")
                         except Exception as e:
                             print("No payload yet")
                             print(e)

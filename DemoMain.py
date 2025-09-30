@@ -15,6 +15,7 @@ import enum
 from dfxutils.renderer import Renderer
 import pickle
 import matplotlib.pyplot as plt
+import argparse
 
 start_str = "start"
 process_limit_str = "process_limit"
@@ -23,8 +24,15 @@ error_str = "error"
 end_process_str = "end"
 initialzied_txt = "initialized"
 message_dir = os.path.join(os.path.abspath("."), "messages")
-_cam_num = 2 # 2 is the IR, 1 is back camera, 0 is front
+parser = argparse.ArgumentParser()
+parser.add_argument(
+    "-c",
+    "--camera",
+    help="Set the camera number. Default is 1", default=1, type=int)
+parser.add_argument("-sdi", "--suppress_dfx_images", help="Suppress DFX Images from showing. Default: True", default=True, type=bool)
+_cam_num = parser.parse_args().camera # 2 is the IR, 1 is back camera, 0 is front
 cam = cv2.VideoCapture(_cam_num)
+
 
 class app_state(enum.Enum):
             INITIALIZING = 0
@@ -34,7 +42,7 @@ class app_state(enum.Enum):
             TERMINATED = 4
 
 class HRM_Proc():
-    def __init__(self, status_shm, hr_shm, coordinator_shm, start_event, status_event, hr_event,app_num,landmark_shm,landmark_event, end_event):
+    def __init__(self, status_shm, hr_shm, coordinator_shm, start_event, status_event, hr_event,app_num,landmark_shm,landmark_event, end_event, suppress=True):
         self.status_shm = status_shm
         self.hr_shm = hr_shm
         self.start_event = start_event
@@ -47,6 +55,9 @@ class HRM_Proc():
         self.landmark_shm = landmark_shm
         self.landmark_event = landmark_event
         self.end_event = end_event
+        self.suppress = suppress
+        self.reset_timer_en = False
+        self.reset_timer = time.time()
     
     def run_worker(self,seconds_to_wait_before_starting):
         json_config_file = "config1.json"
@@ -58,7 +69,7 @@ class HRM_Proc():
                                                          self.app_num, self.status_shm, self.hr_shm, 
                                                          self.start_event, self.status_event, self.hr_event, 
                                                          self.coordinator_shm,seconds_to_wait_before_starting,
-                                                         self.landmark_shm, self.landmark_event, self.end_event))
+                                                         self.landmark_shm, self.landmark_event, self.end_event, self.suppress))
             self.current_state = app_state.INITIALIZING
         except Exception as e:
             raise e
@@ -73,6 +84,8 @@ class HRM_Proc():
         except Exception as e:
             print(f"!!!!! Failure starting PROC {self.app_num}")
             raise e
+        self.reset_timer_en = False
+        self.reset_timer = time.time()
         return self.proc
     
     def stop_process(self):
@@ -108,7 +121,16 @@ class HRM_Proc():
         s = str(bytes(shm.buf[:]).decode()).replace("\x00", "")
         shm.buf[:] = bytearray(shm.buf.nbytes)
         return s
-
+    
+    def begin_reset(self):
+        self.stop_process()
+        self.reset_timer_en = True
+        self.reset_timer = time.time()
+    
+    def check_reset(self, wait_time):
+        if self.reset_timer_en:
+            if time.time() - self.reset_timer > 3:
+                self.launch_process(wait_time)
 
 def _draw_text(msg, render_image, origin, fs=None, fg=None, bg=None, THICK=None):
     FONT = cv2.FONT_HERSHEY_SIMPLEX
@@ -148,7 +170,9 @@ def write_shm_message(shm, event, text):
     event.set()
 
 def read_shm_object(shm):
-    return pickle.loads(shm.buf[:])
+        s = str(bytes(shm.buf[:]).decode()).replace("\x00", "")
+        shm.buf[:] = bytearray(shm.buf.nbytes)
+        return s
 
 class coordinator_state(enum.Enum):
             INITIALIZING = 0,
@@ -156,24 +180,34 @@ class coordinator_state(enum.Enum):
             ACTIVE_MEASURING = 2,
             START_INACTIVE = 3,
             SWAP_ACTIVE_PROCS = 4
-            
 
-def manage_hr_process(worker_arr, hr_shm_gui, hr_event_gui, landmark_shm_gui, landmark_event_gui):
+class gui_state(enum.Enum):
+        INITIALIZING = 0,
+        WAITING_FOR_SUBJECT = 1,
+        ANALYZING = 2,
+        HEART_RATE_MONITORING_IN_PROGRESS = 3,
+        ERROR = -1
+            
+def manage_hr_process(worker_arr, hr_shm_gui, hr_event_gui, landmark_shm_gui, landmark_event_gui, manager_end_event,status_shm_gui,status_event_gui):
     active_app = 1
     inactive_app = 2
-    worker_arr[active_app - 1].launch_process(2)
-    worker_arr[inactive_app - 1].launch_process(2)
+    wait_for_user_time = 2
+    worker_arr[active_app - 1].launch_process(wait_for_user_time)
+    worker_arr[inactive_app - 1].launch_process(wait_for_user_time)
+    reset_timer = time.time()
 
     state = coordinator_state.INITIALIZING
+    write_shm_message(status_shm_gui,status_event_gui,gui_state.INITIALIZING.name)
     while True:
         if worker_arr[active_app - 1].status_event.is_set():
             message_str = worker_arr[active_app - 1].get_status_message()
             print(f"Active app ({active_app}) message received: {message_str}")
             if message_str == initialzied_txt and state == coordinator_state.INITIALIZING:
+                write_shm_message(status_shm_gui,status_event_gui,gui_state.WAITING_FOR_SUBJECT.name)
                 worker_arr[active_app - 1].start_event.set()
                 state = coordinator_state.WAITING_FOR_USER
             elif message_str == measuring_in_progress_str and state == coordinator_state.WAITING_FOR_USER:
-                write_shm_message(hr_shm_gui, hr_event_gui,"Finding subject...")
+                write_shm_message(status_shm_gui,status_event_gui,gui_state.ANALYZING.name)
                 print("Measuring in progress started.")
                 state = coordinator_state.ACTIVE_MEASURING
             elif message_str == process_limit_str and state == coordinator_state.ACTIVE_MEASURING:
@@ -185,23 +219,34 @@ def manage_hr_process(worker_arr, hr_shm_gui, hr_event_gui, landmark_shm_gui, la
                 print(f"Starting heart rate for proc: {inactive_app}")
                 state = coordinator_state.START_INACTIVE
                 print(f"Worker started: {active_app}")
-            elif message_str == end_process_str:
+            # Restart the active app
+            # If in INACTIVE_STARTED, both active and inactive must be restarted. Coordinator set to Initializing
+            # Otherwise, the inactive app becomes the active app and is either not started or in transition
+            elif message_str == end_process_str or message_str == error_str:
                 print(f"END FROM ACTIVE APP {active_app}")
                 print(f"Restarting active app: {active_app}")
-                worker_arr[active_app - 1].stop_process()
-                time.sleep(3)
-                worker_arr[active_app - 1].launch_process(2)
-                state = coordinator_state.INITIALIZING
-            elif message_str == error_str and state == coordinator_state.ACTIVE_MEASURING:
-                print(f"ERROR FROM ACTIVE APP {active_app}")
-                worker_arr[active_app - 1].stop_process()
-                time.sleep(3)
-                worker_arr[active_app - 1].launch_process(2)
-                
-                state = coordinator_state.INITIALIZING
+                if state == coordinator_state.START_INACTIVE:
+                    write_shm_message(status_shm_gui,status_event_gui,gui_state.INITIALIZING.name)
+                    worker_arr[active_app - 1].stop_process()
+                    worker_arr[inactive_app - 1].stop_process()
+                    time.sleep(3)
+                    worker_arr[active_app - 1].launch_process(wait_for_user_time)
+                    worker_arr[inactive_app - 1].launch_process(wait_for_user_time)
+                    state = coordinator_state.INITIALIZING
+                # If the inactive has not been start, assume it has initialized and set it to waiting for user
+                else:
+                    active_app, inactive_app = set_active_process(inactive_app)
+                    worker_arr[inactive_app - 1].start_event.clear()
+                    write_shm_message(status_shm_gui,status_event_gui,gui_state.WAITING_FOR_SUBJECT.name)
+                    worker_arr[active_app - 1].start_event.set()
+                    state = coordinator_state.WAITING_FOR_USER
+                    # handle the now inactive app. 
+                    worker_arr[inactive_app - 1].begin_reset()
+            
             print(f"Active app {active_app} state: {state}")
             worker_arr[active_app - 1].status_event.clear()
 
+        # Inactive worker handling
         if worker_arr[inactive_app - 1].status_event.is_set():
             message_str = worker_arr[inactive_app - 1].get_status_message()
             print(f"Inactive app ({inactive_app}) message received: {message_str}")
@@ -209,13 +254,15 @@ def manage_hr_process(worker_arr, hr_shm_gui, hr_event_gui, landmark_shm_gui, la
                 print("Swapping processes")
                 worker_arr[active_app - 1].stop_process()
                 active_app, inactive_app = set_active_process(inactive_app)
-                worker_arr[inactive_app - 1].start_process(2)
+                worker_arr[inactive_app - 1].launch_process(wait_for_user_time)
                 state = coordinator_state.ACTIVE_MEASURING
             elif message_str == error_str:
                     print(f"ERROR FROM INACTIVE APP {inactive_app}")
+                    write_shm_message(status_shm_gui,status_event_gui,gui_state.ERROR.name)
                     return 0
             print(f"Inactive app {inactive_app} state: {state}")
             worker_arr[inactive_app - 1].status_event.clear()
+
         # Handling GUI communication
         if worker_arr[active_app - 1].hr_event.is_set():
             hr_str = worker_arr[active_app - 1].get_hr_message()
@@ -232,10 +279,15 @@ def manage_hr_process(worker_arr, hr_shm_gui, hr_event_gui, landmark_shm_gui, la
             landmark_shm_gui.buf[:] = worker_arr[active_app - 1].landmark_shm.buf[:]
             landmark_event_gui.set()
             worker_arr[active_app - 1].landmark_event.clear()
-             
+        # Kill the process if this event is set.
+        if manager_end_event.is_set():
+            print("Ending HR Manager")
+            return
+        for w in worker_arr:
+            w.check_reset(wait_for_user_time)
         time.sleep(1)
 
-def gui_process(hr_shm, hr_event, status_shm, status_ready,landmark_shm_gui,landmark_event_gui):
+def gui_process(hr_shm, hr_event, status_shm, status_ready,landmark_shm_gui,landmark_event_gui,end_manager_event):
     output_x = 1920
     output_y = 1080
     frame_offset_y = 20
@@ -264,12 +316,6 @@ def gui_process(hr_shm, hr_event, status_shm, status_ready,landmark_shm_gui,land
     plt.xlabel("Measurment Number")
     hr_history_arr = [0,0,0,0,0]
     last_polygons = None
-    
-    class gui_state(enum.Enum):
-        INITIALIZING = 0,
-        WAITING_FOR_SUBJECT = 1,
-        ANALYZING = 2,
-        HEART_RATE_MONITORING_IN_PROGRESS = 3
 
     def write_shm_message(shm, event, text):
         shm.buf[:text.__len__()] = bytearray(text, 'utf-8')
@@ -277,7 +323,7 @@ def gui_process(hr_shm, hr_event, status_shm, status_ready,landmark_shm_gui,land
 
     def get_hr_message():
         s = str(bytes(hr_shm.buf[:]).decode()).replace("\x00", "")
-        print(f"FROM IN GUI: {s}")
+        #print(f"FROM IN GUI: {s}")
         hr_shm.buf[:] = bytearray(hr_shm.buf.nbytes)
         hr_event.clear()
         return s
@@ -318,21 +364,30 @@ def gui_process(hr_shm, hr_event, status_shm, status_ready,landmark_shm_gui,land
         display_frame[frame_offset_y : frame_offset_y + live_image.shape[0], 
                        frame_offset_x : frame_offset_x + live_image.shape[1],
                        :] = live_image
+        no_hr_txt = "   BPM"
         if gstate == gui_state.INITIALIZING:
-            text = "Initializing"
-            color = yellow
+            status_txt = "Initializing"
+            hr_txt = no_hr_txt
+            color = red
         elif gstate == gui_state.WAITING_FOR_SUBJECT:
-            text = "Waiting for subject"
+            status_txt = "Waiting for subject"
+            hr_txt = no_hr_txt
             color = yellow
         elif gstate == gui_state.ANALYZING:
-            text = "Analyzing..."
+            status_txt = "User found"
+            hr_txt = "Analysis in progress. First measurement may take up to 30 seconds."
             color = yellow
         elif gstate == gui_state.HEART_RATE_MONITORING_IN_PROGRESS:
-            text = "Heart Rate Monitoring in progress"
+            status_txt = "Heart Rate Monitoring in progress"
             color = green
+        elif gstate == gui_state.ERROR:
+            status_txt = "ERROR. Please restart."
+            hr_txt = no_hr_txt
+            color = red
         else:
-             text = "Uknown State"
+             status_txt = "Uknown State"
              color = (255,255,255)
+        
         # Draw the Status text
         cv2.putText(display_frame, status_txt, 
                     status_text_coord,
@@ -383,6 +438,10 @@ def gui_process(hr_shm, hr_event, status_shm, status_ready,landmark_shm_gui,land
     cv2.putText(blank_frame, "VB56GxA 1.5MP IR Sensor", 
                     sensor_text_coord,
                     FONT, fs, (255,255,255), THICK, AA)
+    # Exit Aplication information
+    cv2.putText(blank_frame, "Press 'q' to exit demo", 
+                    (10, sensor_text_coord[0]),
+                    FONT, fs, (25,25,25), THICK, AA)
     sensor_img_x_offset = int(np.mean((sensor_text_coord[0], blank_frame.shape[1])) - (sensor_image.shape[1] / 2))
     sensor_img_y_offset = sensor_text_coord[1] - sensor_image.shape[0] - frame_offset_y - 30
     blank_frame[sensor_img_y_offset : sensor_img_y_offset + sensor_image.shape[0], 
@@ -392,9 +451,18 @@ def gui_process(hr_shm, hr_event, status_shm, status_ready,landmark_shm_gui,land
     while True:
         display_frame = np.copy(blank_frame)
         #hr_txt = "0 BPM"
-        if hr_event.is_set():
+        if status_ready.is_set():
+            status_ready.clear()
+            s = read_shm_object(status_shm)
+            for stat in gui_state:
+                if s == stat.name:
+                    state = stat
+                    print(f"New gui state -> {state}")
+                    break
+        if hr_event.is_set() and ((state == gui_state.ANALYZING) or (state == gui_state.HEART_RATE_MONITORING_IN_PROGRESS)):
              hr_txt = get_hr_message()[0:2] + " BPM"
-             print(f"GUI received ->{status_txt}")
+             state = gui_state.HEART_RATE_MONITORING_IN_PROGRESS
+             print(f"New GUI BPM set -> {hr_txt}")
             
         frame = cv2.resize(frame, dsize=live_image_dim)
         draw_frame(frame, state, hr_txt, last_polygons)
@@ -402,13 +470,14 @@ def gui_process(hr_shm, hr_event, status_shm, status_ready,landmark_shm_gui,land
         k = cv2.waitKey(1) & 0xFF
         if k == ord('q'):
             cv2.destroyAllWindows()
-            write_shm_message(status_shm, status_ready, end_process_str)
+            end_manager_event.set()
             cam.release()
             return 0
         ret, frame = cam.read()
     return 1
     
 if __name__ == "__main__":
+    
     ARRAY_SIZE = 512
     # Create shared memory and event flags to 2 processes
     # Status from worker to coordinator
@@ -435,6 +504,8 @@ if __name__ == "__main__":
     end_event_1.clear()
     end_event_2 = multiprocessing.Event()
     end_event_2.clear()
+    hr_end_event = multiprocessing.Event()
+    hr_end_event.clear()
     hr_ready_event_1 = multiprocessing.Event() # This event is sent from worker to coordinator to read a new HR
     hr_ready_event_1.clear()
     hr_ready_event_2 = multiprocessing.Event()
@@ -456,15 +527,16 @@ if __name__ == "__main__":
 
     # Establish worker processes
     set_active_process(1)
-    worker_1 = HRM_Proc(status_shm_1, hr_shm_1,coordinator_worker_shm_1,start_event_1,status_event_1,hr_ready_event_1,1,landmark_shm_gui, landmark_event_gui, end_event_1)
-    worker_2 = HRM_Proc(status_shm_2, hr_shm_2,coordinator_worker_shm_2,start_event_2,status_event_2,hr_ready_event_2,2,landmark_shm_gui, landmark_event_gui, end_event_2)
+    worker_1 = HRM_Proc(status_shm_1, hr_shm_1,coordinator_worker_shm_1,start_event_1,status_event_1,hr_ready_event_1,1,landmark_shm_gui, landmark_event_gui, end_event_1, suppress=parser.parse_args().suppress_dfx_images)
+    worker_2 = HRM_Proc(status_shm_2, hr_shm_2,coordinator_worker_shm_2,start_event_2,status_event_2,hr_ready_event_2,2,landmark_shm_gui, landmark_event_gui, end_event_2, suppress=parser.parse_args().suppress_dfx_images)
     worker_arr = [worker_1, worker_2]
-    hr_coordinator_proc = Process(target=manage_hr_process, name="hr_proc", args=(worker_arr, hr_shm_gui, hr_ready_event_gui,landmark_shm_gui, landmark_event_gui))
+    hr_coordinator_proc = Process(target=manage_hr_process, name="hr_proc", args=(worker_arr, hr_shm_gui, hr_ready_event_gui,landmark_shm_gui, landmark_event_gui,hr_end_event,status_shm_gui,status_event_gui))
     hr_coordinator_proc.start()
-    gui_process(hr_shm_gui,hr_ready_event_gui,status_shm_gui,status_event_gui,landmark_shm_gui,landmark_event_gui)
+    gui_process(hr_shm_gui,hr_ready_event_gui,status_shm_gui,status_event_gui,landmark_shm_gui,landmark_event_gui,hr_end_event)
 
     print("-------ENDING DEMO---------")
-    hr_coordinator_proc.join()
+    hr_end_event.set()
+    hr_coordinator_proc.terminate()
     for worker in worker_arr:
         worker.stop_process()
     for shm in all_shm:
