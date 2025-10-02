@@ -89,7 +89,6 @@ def get_status_message(shm):
 async def main(args):
     # Load config
     config = load_config(args.config_file)
-    print(f"Messages Directory: f{message_dir}")
 
     # Check if alternate URL was passed
     if "rest_url" in args and args.rest_url is not None:
@@ -847,6 +846,7 @@ async def run_measurements(config_file, camera_num, md, app_num, status_shm, hr_
                     # We are done if the last chunk is sent and number of results received equals number of chunks sent
                     if app.last_chunk_sent and num_results_received == app.number_chunks_sent:
                         await ws.close()
+                        print("END OF MEASUREMENT HAPPENED")
                         break
 
                 app.step = MeasurementStep.COMPLETED
@@ -896,6 +896,8 @@ async def run_measurements(config_file, camera_num, md, app_num, status_shm, hr_
                         print(e)
                         # raise e  # Uncomment this to see a stack trace
                 print(f"Measurement {app.measurement_id} failed")
+                write_shm_message(status_shm,status_event,error_txt)
+                raise ValueError("Measurement was cancelled by user.")
             else:
                 print("ending")
                 #config["last_measurement"] = app.measurement_id

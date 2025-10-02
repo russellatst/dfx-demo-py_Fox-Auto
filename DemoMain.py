@@ -30,8 +30,12 @@ parser.add_argument(
     "--camera",
     help="Set the camera number. Default is 1", default=1, type=int)
 parser.add_argument("-sdi", "--suppress_dfx_images", help="Suppress DFX Images from showing. Default: True", default=True, type=bool)
+parser.add_argument("-tts", "--time_to_start", help="The amount of time a face must be present to start the HRM. Default: 1", default=1, type=int)
+wait_for_user_time = parser.parse_args().time_to_start
+suppress = parser.parse_args().suppress_dfx_images
 _cam_num = parser.parse_args().camera # 2 is the IR, 1 is back camera, 0 is front
 cam = cv2.VideoCapture(_cam_num)
+_polygon_persist_counter_max = 3
 
 
 class app_state(enum.Enum):
@@ -58,6 +62,7 @@ class HRM_Proc():
         self.suppress = suppress
         self.reset_timer_en = False
         self.reset_timer = time.time()
+        self.is_initialized = False
     
     def run_worker(self,seconds_to_wait_before_starting):
         json_config_file = "config1.json"
@@ -77,6 +82,7 @@ class HRM_Proc():
     def launch_process(self, seconds_to_wait_before_starting):
         print(f"Starting PROC {self.app_num}")
         try:
+            self.end_event.clear()
             self.proc = Process(target=self.run_worker, name=str(self.app_num), args=(seconds_to_wait_before_starting,))
             self.proc.start()
             self.start_event.clear()
@@ -99,6 +105,7 @@ class HRM_Proc():
                 self.proc = None
             self.current_state = app_state.TERMINATED
             print(f"Successful end of PROC {self.app_num}")
+            self.is_initialized = False
         except Exception as e:
             print(f"!!!!! Failure ending PROC {self.app_num}")
             raise e
@@ -150,6 +157,18 @@ def _draw_text(msg, render_image, origin, fs=None, fg=None, bg=None, THICK=None)
 
     return origin[1] + sz[1] + baseline + 1
 
+def lock_camera_autoexposure():
+    message_dir = os.path.join(os.path.abspath("."), "PythonCapture_EntronModule")
+    f = open(os.path.join(message_dir,"1"),"w")
+    f.close()
+    print(f"WROTE: aelock")
+
+def enable_camera_autoexposure():
+    message_dir = os.path.join(os.path.abspath("."), "PythonCapture_EntronModule")
+    f = open(os.path.join(message_dir,"0"),"w")
+    f.close()
+    print(f"WROTE: aelock")
+
 def set_active_process(app_num):
     active_app = app_num
     inactive_app = (app_num % 2) + 1
@@ -191,10 +210,9 @@ class gui_state(enum.Enum):
 def manage_hr_process(worker_arr, hr_shm_gui, hr_event_gui, landmark_shm_gui, landmark_event_gui, manager_end_event,status_shm_gui,status_event_gui):
     active_app = 1
     inactive_app = 2
-    wait_for_user_time = 2
+    enable_camera_autoexposure()
     worker_arr[active_app - 1].launch_process(wait_for_user_time)
     worker_arr[inactive_app - 1].launch_process(wait_for_user_time)
-    reset_timer = time.time()
 
     state = coordinator_state.INITIALIZING
     write_shm_message(status_shm_gui,status_event_gui,gui_state.INITIALIZING.name)
@@ -202,14 +220,18 @@ def manage_hr_process(worker_arr, hr_shm_gui, hr_event_gui, landmark_shm_gui, la
         if worker_arr[active_app - 1].status_event.is_set():
             message_str = worker_arr[active_app - 1].get_status_message()
             print(f"Active app ({active_app}) message received: {message_str}")
+            # Initialization finished
             if message_str == initialzied_txt and state == coordinator_state.INITIALIZING:
                 write_shm_message(status_shm_gui,status_event_gui,gui_state.WAITING_FOR_SUBJECT.name)
                 worker_arr[active_app - 1].start_event.set()
                 state = coordinator_state.WAITING_FOR_USER
+            # A user is found and measurement has begun
             elif message_str == measuring_in_progress_str and state == coordinator_state.WAITING_FOR_USER:
                 write_shm_message(status_shm_gui,status_event_gui,gui_state.ANALYZING.name)
+                lock_camera_autoexposure()
                 print("Measuring in progress started.")
                 state = coordinator_state.ACTIVE_MEASURING
+            # The main process has met the threshold limit and the new process should begin
             elif message_str == process_limit_str and state == coordinator_state.ACTIVE_MEASURING:
                 print(f"Limit received from {active_app}")
                 # worker_arr[active_app - 1].current_state = app_state.LIMIT_REACHED
@@ -225,6 +247,7 @@ def manage_hr_process(worker_arr, hr_shm_gui, hr_event_gui, landmark_shm_gui, la
             elif message_str == end_process_str or message_str == error_str:
                 print(f"END FROM ACTIVE APP {active_app}")
                 print(f"Restarting active app: {active_app}")
+                enable_camera_autoexposure()
                 if state == coordinator_state.START_INACTIVE:
                     write_shm_message(status_shm_gui,status_event_gui,gui_state.INITIALIZING.name)
                     worker_arr[active_app - 1].stop_process()
@@ -238,10 +261,10 @@ def manage_hr_process(worker_arr, hr_shm_gui, hr_event_gui, landmark_shm_gui, la
                     active_app, inactive_app = set_active_process(inactive_app)
                     worker_arr[inactive_app - 1].start_event.clear()
                     write_shm_message(status_shm_gui,status_event_gui,gui_state.WAITING_FOR_SUBJECT.name)
-                    worker_arr[active_app - 1].start_event.set()
-                    state = coordinator_state.WAITING_FOR_USER
+                    state = coordinator_state.WAITING_FOR_USER if worker_arr[active_app - 1].is_initialized else coordinator_state.INITIALIZING
                     # handle the now inactive app. 
                     worker_arr[inactive_app - 1].begin_reset()
+                    worker_arr[active_app - 1].start_event.set()
             
             print(f"Active app {active_app} state: {state}")
             worker_arr[active_app - 1].status_event.clear()
@@ -256,6 +279,9 @@ def manage_hr_process(worker_arr, hr_shm_gui, hr_event_gui, landmark_shm_gui, la
                 active_app, inactive_app = set_active_process(inactive_app)
                 worker_arr[inactive_app - 1].launch_process(wait_for_user_time)
                 state = coordinator_state.ACTIVE_MEASURING
+            elif message_str == initialzied_txt:
+                print(f"Inactive app {inactive_app} is initialized")
+                worker_arr[inactive_app - 1].is_initialized = True
             elif message_str == error_str:
                     print(f"ERROR FROM INACTIVE APP {inactive_app}")
                     write_shm_message(status_shm_gui,status_event_gui,gui_state.ERROR.name)
@@ -311,11 +337,12 @@ def gui_process(hr_shm, hr_event, status_shm, status_ready,landmark_shm_gui,land
     #sensor_image = cv2.resize(sensor_image, (0,0), fx= 0.3, fy=0.3, interpolation=cv2.INTER_AREA)
     multiplier = 1.5
     input_size = [341, 282]
-    fig = plt.figure()
+    hr_history_arr = [0] * 10
+    hr_fig = plt.figure()
     plt.ylabel("Heart Rate (BPM)")
     plt.xlabel("Measurment Number")
-    hr_history_arr = [0,0,0,0,0]
     last_polygons = None
+    polygon_persist_counter = _polygon_persist_counter_max
 
     def write_shm_message(shm, event, text):
         shm.buf[:text.__len__()] = bytearray(text, 'utf-8')
@@ -345,16 +372,22 @@ def gui_process(hr_shm, hr_event, status_shm, status_ready,landmark_shm_gui,land
         image = cv2.flip(image, 1)
         return image
     
-    def draw_frame(live_image,gstate,hr_txt, last_polygons):
+    def draw_frame(live_image,gstate,hr_txt, last_polygons, polygon_persist_counter):
         
         polygons = pickle.loads(landmark_shm_gui.buf[:]) if landmark_event_gui.is_set() else None
+        face_found = False
         
         if polygons is not None and len(polygons) > 1:
             live_image = draw_polygons_mask(polygons, live_image)
             landmark_event_gui.clear()
-            polygons = last_polygons
-        elif last_polygons is not None and len(last_polygons) > 1:
+            last_polygons = polygons
+            face_found = True
+            polygon_persist_counter = _polygon_persist_counter_max
+        elif last_polygons is not None and len(last_polygons) > 1 and polygon_persist_counter > 0:
             live_image = draw_polygons_mask(last_polygons, live_image)
+            face_found = True
+            polygon_persist_counter -= 1
+        else:
             last_polygons = None
 
         green = (0, 255, 0)
@@ -372,10 +405,12 @@ def gui_process(hr_shm, hr_event, status_shm, status_ready,landmark_shm_gui,land
         elif gstate == gui_state.WAITING_FOR_SUBJECT:
             status_txt = "Waiting for subject"
             hr_txt = no_hr_txt
+            if face_found:
+                status_txt = "User Found! Analysis will begin shortly"
             color = yellow
         elif gstate == gui_state.ANALYZING:
-            status_txt = "User found"
-            hr_txt = "Analysis in progress. First measurement may take up to 30 seconds."
+            status_txt = "User found! Please wait ~15 seconds"
+            hr_txt = "Analysis in progress."
             color = yellow
         elif gstate == gui_state.HEART_RATE_MONITORING_IN_PROGRESS:
             status_txt = "Heart Rate Monitoring in progress"
@@ -396,6 +431,8 @@ def gui_process(hr_shm, hr_event, status_shm, status_ready,landmark_shm_gui,land
         cv2.putText(display_frame, hr_txt, 
                     bpm_text_coord,
                     FONT, 5, white, THICK, AA)
+
+        return last_polygons, polygon_persist_counter
         
     
     state = gui_state.INITIALIZING
@@ -434,14 +471,14 @@ def gui_process(hr_shm, hr_event, status_shm, status_ready,landmark_shm_gui,land
     status_text_coord = (logos_x_offset, heart_icon_y_offset + heart_icon.shape[1] + (3 * frame_offset_y))
     # Sensor Text and image
     sensor_text_coord = ((blank_frame.shape[1] - 700),
-                     blank_frame.shape[0] - 10)
+                     blank_frame.shape[0] - 80)
     cv2.putText(blank_frame, "VB56GxA 1.5MP IR Sensor", 
                     sensor_text_coord,
                     FONT, fs, (255,255,255), THICK, AA)
     # Exit Aplication information
     cv2.putText(blank_frame, "Press 'q' to exit demo", 
-                    (10, sensor_text_coord[0]),
-                    FONT, fs, (25,25,25), THICK, AA)
+                    (10, sensor_text_coord[1]),
+                    FONT, fs, (50,50,50), THICK, AA)
     sensor_img_x_offset = int(np.mean((sensor_text_coord[0], blank_frame.shape[1])) - (sensor_image.shape[1] / 2))
     sensor_img_y_offset = sensor_text_coord[1] - sensor_image.shape[0] - frame_offset_y - 30
     blank_frame[sensor_img_y_offset : sensor_img_y_offset + sensor_image.shape[0], 
@@ -460,12 +497,22 @@ def gui_process(hr_shm, hr_event, status_shm, status_ready,landmark_shm_gui,land
                     print(f"New gui state -> {state}")
                     break
         if hr_event.is_set() and ((state == gui_state.ANALYZING) or (state == gui_state.HEART_RATE_MONITORING_IN_PROGRESS)):
-             hr_txt = get_hr_message()[0:2] + " BPM"
-             state = gui_state.HEART_RATE_MONITORING_IN_PROGRESS
-             print(f"New GUI BPM set -> {hr_txt}")
+            hr_txt = get_hr_message()[0:2] + " BPM"
+            state = gui_state.HEART_RATE_MONITORING_IN_PROGRESS
+            #np.roll(hr_history_arr, -1)
+            #hr_history_arr[:-1] = int(hr_txt)
+            print(f"New GUI BPM set -> {hr_txt}")
+            # Draw the graph
+            # plt.plot(np.arange(len(hr_history_arr)), hr_history_arr)
+            # hr_fig.canvas.draw()
+            # plot = np.fromstring(hr_fig.canvas.(), dtype=np.uint8,sep='')
+            # plot = plot.reshape(hr_fig.canvas.get_width_height()[::-1] + (3,))
+            # plot = cv2.cvtColor(plot, cv2.COLOR_RGB2BGR)
+            # display_frame[status_text_coord[0] : status_text_coord[0] + plot.shape[0],
+            #             status_text_coord[1] : status_text_coord[1] + plot.shape[1],:] = plot
             
         frame = cv2.resize(frame, dsize=live_image_dim)
-        draw_frame(frame, state, hr_txt, last_polygons)
+        last_polygons, polygon_persist_counter = draw_frame(frame, state, hr_txt, last_polygons, polygon_persist_counter)
         cv2.imshow("Result", display_frame)
         k = cv2.waitKey(1) & 0xFF
         if k == ord('q'):
@@ -527,8 +574,8 @@ if __name__ == "__main__":
 
     # Establish worker processes
     set_active_process(1)
-    worker_1 = HRM_Proc(status_shm_1, hr_shm_1,coordinator_worker_shm_1,start_event_1,status_event_1,hr_ready_event_1,1,landmark_shm_gui, landmark_event_gui, end_event_1, suppress=parser.parse_args().suppress_dfx_images)
-    worker_2 = HRM_Proc(status_shm_2, hr_shm_2,coordinator_worker_shm_2,start_event_2,status_event_2,hr_ready_event_2,2,landmark_shm_gui, landmark_event_gui, end_event_2, suppress=parser.parse_args().suppress_dfx_images)
+    worker_1 = HRM_Proc(status_shm_1, hr_shm_1,coordinator_worker_shm_1,start_event_1,status_event_1,hr_ready_event_1,1,landmark_shm_gui, landmark_event_gui, end_event_1, suppress=suppress)
+    worker_2 = HRM_Proc(status_shm_2, hr_shm_2,coordinator_worker_shm_2,start_event_2,status_event_2,hr_ready_event_2,2,landmark_shm_gui, landmark_event_gui, end_event_2, suppress=suppress)
     worker_arr = [worker_1, worker_2]
     hr_coordinator_proc = Process(target=manage_hr_process, name="hr_proc", args=(worker_arr, hr_shm_gui, hr_ready_event_gui,landmark_shm_gui, landmark_event_gui,hr_end_event,status_shm_gui,status_event_gui))
     hr_coordinator_proc.start()

@@ -114,6 +114,14 @@ with pyvirtualcam.Camera(width=output_x, height=output_y, fps=set_framerate) as 
             image = cv2.cvtColor(image, cv2.COLOR_GRAY2RGB)
             cam.send(image)
             cam.sleep_until_next_frame()
+            if os.path.exists(os.path.join(os.path.abspath("."), "1")):
+                os.remove(os.path.join(os.path.abspath("."), "1"))
+                exposure_mode = 1
+                entronSDK.module_setExposure(exposure_mode, 1,1)
+            if os.path.exists(os.path.join(os.path.abspath("."), "0")):
+                os.remove(os.path.join(os.path.abspath("."), "0"))
+                exposure_mode = 0
+                entronSDK.module_setExposure(exposure_mode, 1,1)
             if _DISPLAY:
                 image = cv.resize(image, (0, 0), fx=0.5, fy=0.5)
 
