@@ -1,0 +1,2 @@
+dfxdemo -c config2.json org register 98af5ebc-bf92-4e31-b4ff-00455538a66c --rest-url https://model1-api.na-east.research.deepaffex.ai
+dfxdemo -c config1.json org register 98af5ebc-bf92-4e31-b4ff-00455538a66c --rest-url https://model1-api.na-east.research.deepaffex.ai
