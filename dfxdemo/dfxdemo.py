@@ -851,7 +851,8 @@ async def run_measurements(config_file, camera_num, md, app_num, status_shm, hr_
 
                 app.step = MeasurementStep.COMPLETED
                 print("Measurement complete")
-                write_shm_message(status_shm,status_event,error_txt)
+                # If the measurement fails one time, you should run the setup bat again.
+                write_shm_message(status_shm,status_event,error_txt+"Measurement Completed")
                 app.step = MeasurementStep.USER_CANCELLED
 
 

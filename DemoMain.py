@@ -46,7 +46,7 @@ class app_state(enum.Enum):
             TERMINATED = 4
 
 class HRM_Proc():
-    def __init__(self, status_shm, hr_shm, coordinator_shm, start_event, status_event, hr_event,app_num,landmark_shm,landmark_event, end_event, suppress=True):
+    def __init__(self, status_shm, hr_shm, coordinator_shm, start_event, status_event, hr_event,app_num,landmark_shm,landmark_event, end_event, need_to_join_event, suppress=True):
         self.status_shm = status_shm
         self.hr_shm = hr_shm
         self.start_event = start_event
@@ -63,6 +63,8 @@ class HRM_Proc():
         self.reset_timer_en = False
         self.reset_timer = time.time()
         self.is_initialized = False
+        self.need_to_join_event = need_to_join_event
+        self.needs_to_be_joined = False
     
     def run_worker(self,seconds_to_wait_before_starting):
         json_config_file = "config1.json"
@@ -77,10 +79,16 @@ class HRM_Proc():
                                                          self.landmark_shm, self.landmark_event, self.end_event, self.suppress))
             self.current_state = app_state.INITIALIZING
         except Exception as e:
-            raise e
+            print(f"Error in worker {self.app_num}")
+            print(e)
+            self.write_shm_message(self.status_shm, self.status_event, error_str)
+            #raise e
 
     def launch_process(self, seconds_to_wait_before_starting):
         print(f"Starting PROC {self.app_num}")
+        if self.proc != None:
+            if self.proc.is_alive():
+                print(f"Proc {self.app_num} tried to start but is already running")
         try:
             self.end_event.clear()
             self.proc = Process(target=self.run_worker, name=str(self.app_num), args=(seconds_to_wait_before_starting,))
@@ -101,10 +109,22 @@ class HRM_Proc():
             #self.start_event.set()
             self.end_event.set()
             if self.proc != None:
-                self.proc.terminate()
-                self.proc = None
-            self.current_state = app_state.TERMINATED
-            print(f"Successful end of PROC {self.app_num}")
+                if self.proc.is_alive():
+                    self.proc.terminate()
+                    print("starting join")
+                    self.proc.join()
+                    self.proc.close()
+                    print("ending join")
+                    print(f"what is the proc now? {self.proc.__class__}")
+                    #self.proc = None
+                    self.current_state = app_state.TERMINATED
+                    #self.need_to_join_event.set()
+                    #self.needs_to_be_joined = True
+                    print(f"Successful end of PROC {self.app_num}")
+                else:
+                    print(f"Tried to end PROC {self.app_num} but it was already dead")
+            else:
+                print(f"Tried to end PROC {self.app_num} but it was never started")
             self.is_initialized = False
         except Exception as e:
             print(f"!!!!! Failure ending PROC {self.app_num}")
@@ -135,8 +155,10 @@ class HRM_Proc():
         self.reset_timer = time.time()
     
     def check_reset(self, wait_time):
-        if self.reset_timer_en:
-            if time.time() - self.reset_timer > 3:
+        if not self.proc == None:
+            #print(f"Needs to be joined is {self.needs_to_be_joined} for app {self.app_num}")
+            if not self.proc.is_alive():
+                print(f"Re-launching app {self.app_num}")
                 self.launch_process(wait_time)
 
 def _draw_text(msg, render_image, origin, fs=None, fg=None, bg=None, THICK=None):
@@ -180,7 +202,7 @@ def display_result(app_num):
     ret, frame = cam.read()
     c, r = 2, 15
     r = _draw_text(f"Current Result: {app_num}", frame, (c,r))
-    cv2.imshow("Result", frame)
+    cv2.imshow("Automotive Heart Rate Monitoring Demo", frame)
     k = cv2.waitKey(1) & 0xFF
     return k
 
@@ -244,8 +266,11 @@ def manage_hr_process(worker_arr, hr_shm_gui, hr_event_gui, landmark_shm_gui, la
             # Restart the active app
             # If in INACTIVE_STARTED, both active and inactive must be restarted. Coordinator set to Initializing
             # Otherwise, the inactive app becomes the active app and is either not started or in transition
-            elif message_str == end_process_str or message_str == error_str:
+            elif message_str == end_process_str or message_str.__contains__(error_str):
                 print(f"END FROM ACTIVE APP {active_app}")
+                if message_str.__contains__(error_str):
+                    print("Ending due to error:")
+                    print(message_str)
                 print(f"Restarting active app: {active_app}")
                 enable_camera_autoexposure()
                 if state == coordinator_state.START_INACTIVE:
@@ -282,10 +307,13 @@ def manage_hr_process(worker_arr, hr_shm_gui, hr_event_gui, landmark_shm_gui, la
             elif message_str == initialzied_txt:
                 print(f"Inactive app {inactive_app} is initialized")
                 worker_arr[inactive_app - 1].is_initialized = True
-            elif message_str == error_str:
+            elif message_str.__contains__(error_str):
                     print(f"ERROR FROM INACTIVE APP {inactive_app}")
-                    write_shm_message(status_shm_gui,status_event_gui,gui_state.ERROR.name)
-                    return 0
+                    print(message_str)
+                    print("Resetting inactive app.")
+                    #write_shm_message(status_shm_gui,status_event_gui,gui_state.ERROR.name)
+                    #return 0
+                    worker_arr[inactive_app - 1].begin_reset()
             print(f"Inactive app {inactive_app} state: {state}")
             worker_arr[inactive_app - 1].status_event.clear()
 
@@ -307,6 +335,9 @@ def manage_hr_process(worker_arr, hr_shm_gui, hr_event_gui, landmark_shm_gui, la
             worker_arr[active_app - 1].landmark_event.clear()
         # Kill the process if this event is set.
         if manager_end_event.is_set():
+            for w in worker_arr:
+                print(f"Killing process {w.app_num}")
+                w.stop_process()
             print("Ending HR Manager")
             return
         for w in worker_arr:
@@ -361,7 +392,7 @@ def gui_process(hr_shm, hr_event, status_shm, status_ready,landmark_shm_gui,land
         return s
     
     def draw_polygons_mask(polygons, image):
-        image = cv2.flip(image, 1)
+        #image = cv2.flip(image, 1)
         for polygon in polygons:
             cv2.polylines(image, 
                             [np.round(np.array(polygon) * multiplier).astype(int)],
@@ -369,7 +400,7 @@ def gui_process(hr_shm, hr_event, status_shm, status_ready,landmark_shm_gui,land
                         color=(255, 255, 0),
                         thickness=1,
                         lineType=cv2.LINE_AA)
-        image = cv2.flip(image, 1)
+        #image = cv2.flip(image, 1)
         return image
     
     def draw_frame(live_image,gstate,hr_txt, last_polygons, polygon_persist_counter):
@@ -377,6 +408,7 @@ def gui_process(hr_shm, hr_event, status_shm, status_ready,landmark_shm_gui,land
         polygons = pickle.loads(landmark_shm_gui.buf[:]) if landmark_event_gui.is_set() else None
         face_found = False
         
+        live_image = cv2.flip(live_image, 1)
         if polygons is not None and len(polygons) > 1:
             live_image = draw_polygons_mask(polygons, live_image)
             landmark_event_gui.clear()
@@ -522,7 +554,7 @@ def gui_process(hr_shm, hr_event, status_shm, status_ready,landmark_shm_gui,land
             return 0
         ret, frame = cam.read()
     return 1
-    
+
 if __name__ == "__main__":
     
     ARRAY_SIZE = 512
@@ -540,7 +572,7 @@ if __name__ == "__main__":
     hr_shm_1 = shared_memory.SharedMemory(create = True, size=ARRAY_SIZE * np.dtype(np.int32).itemsize)
     hr_shm_2 = shared_memory.SharedMemory(create = True, size=ARRAY_SIZE * np.dtype(np.int32).itemsize)
     hr_shm_gui = shared_memory.SharedMemory(create = True, size=ARRAY_SIZE * np.dtype(np.int32).itemsize)
-    all_shm = [status_shm_1,status_shm_1,status_shm_gui,coordinator_worker_shm_1,coordinator_worker_shm_2,landmark_shm_1,landmark_shm_gui,
+    all_shm = [status_shm_1,status_shm_2,status_shm_gui,coordinator_worker_shm_1,coordinator_worker_shm_2,landmark_shm_1,landmark_shm_gui,
                hr_shm_1,hr_shm_2,hr_shm_gui]
 
     start_event_1 = multiprocessing.Event() # This even is sent from coordinator to workers to start HR
@@ -571,11 +603,15 @@ if __name__ == "__main__":
     landmark_event_2.clear()
     landmark_event_gui = multiprocessing.Event()
     landmark_event_gui.clear()
+    join_event_1 = multiprocessing.Event()
+    join_event_1.clear()
+    join_event_2= multiprocessing.Event()
+    join_event_2.clear()
 
     # Establish worker processes
     set_active_process(1)
-    worker_1 = HRM_Proc(status_shm_1, hr_shm_1,coordinator_worker_shm_1,start_event_1,status_event_1,hr_ready_event_1,1,landmark_shm_gui, landmark_event_gui, end_event_1, suppress=suppress)
-    worker_2 = HRM_Proc(status_shm_2, hr_shm_2,coordinator_worker_shm_2,start_event_2,status_event_2,hr_ready_event_2,2,landmark_shm_gui, landmark_event_gui, end_event_2, suppress=suppress)
+    worker_1 = HRM_Proc(status_shm_1, hr_shm_1,coordinator_worker_shm_1,start_event_1,status_event_1,hr_ready_event_1,1,landmark_shm_gui, landmark_event_gui, end_event_1,join_event_1, suppress=suppress)
+    worker_2 = HRM_Proc(status_shm_2, hr_shm_2,coordinator_worker_shm_2,start_event_2,status_event_2,hr_ready_event_2,2,landmark_shm_gui, landmark_event_gui, end_event_2,join_event_2, suppress=suppress)
     worker_arr = [worker_1, worker_2]
     hr_coordinator_proc = Process(target=manage_hr_process, name="hr_proc", args=(worker_arr, hr_shm_gui, hr_ready_event_gui,landmark_shm_gui, landmark_event_gui,hr_end_event,status_shm_gui,status_event_gui))
     hr_coordinator_proc.start()
@@ -584,8 +620,8 @@ if __name__ == "__main__":
     print("-------ENDING DEMO---------")
     hr_end_event.set()
     hr_coordinator_proc.terminate()
-    for worker in worker_arr:
-        worker.stop_process()
+    hr_coordinator_proc.join()
+    hr_coordinator_proc.close()
     for shm in all_shm:
         shm.close()
         shm.unlink()
