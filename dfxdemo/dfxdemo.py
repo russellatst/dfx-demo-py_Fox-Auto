@@ -23,6 +23,8 @@ from dfxutils.renderer import NullRenderer, Renderer
 from dfxutils.sdkhelpers import DfxSdkHelpers
 
 import pickle
+import time
+import multiprocessing
 
 changed_max_duration = 130
 
@@ -66,12 +68,16 @@ measuring_in_progress_txt = "measuring_in_progress"
 error_txt = "error"
 end_process_txt = "end"
 initialzied_txt = "initialized"
+exit_txt = "exited"
 process_limit_reached = False
 process_limit_num = 80
 message_dir = os.path.join(os.path.abspath("."), "messages")
 
 
 def write_shm_message(shm, event, text):
+    #while not event.is_set():
+    #    print(f"tried to write {text} to {event.name} but it's not seen")
+    #    time.sleep(1)
     shm.buf[:text.__len__()] = bytearray(text, 'utf-8')
     event.set()
 
@@ -570,7 +576,7 @@ async def main(args):
                 print(f"Use 'dfxdemo measure get' to get comprehensive results")
 
 ### RKW making a slimmed down run version
-async def run_measurements(config_file, camera_num, md, app_num, status_shm, hr_shm, start_event, status_event, hr_event, coordinator_shm,seconds_to_wait_before_starting, landmark_shm, landmark_event, end_event,suppress):
+async def run_measurements(config_file, camera_num, md, app_num, status_queue, hr_shm, start_event, status_event, hr_event, coordinator_shm,seconds_to_wait_before_starting, landmark_shm, landmark_event, end_event,suppress):
     # Load config
     config = load_config(config_file)
 
@@ -597,11 +603,9 @@ async def run_measurements(config_file, camera_num, md, app_num, status_shm, hr_
             save_config(new_config, config_file)
         if not renewed:
             print("!!!!!!!!!!")
-            write_shm_message(status_shm, status_event,error_txt)
+            #write_shm_message(status_shm, status_event,error_txt)
+            status_queue.put_nowait(error_txt)
             return
-
-    # Handle "measure" (Measurements) commands - "make" and "debug_make_from_chunks"
-    #assert args.command in ["m", "measure", "measurements"] and "make" in args.subcommand
 
     # Verify preconditions
     # 1. Make sure we have a valid device_token
@@ -718,9 +722,9 @@ async def run_measurements(config_file, camera_num, md, app_num, status_shm, hr_
     async with aiohttp.ClientSession(headers=headers, raise_for_status=True) as session:
         # Create a measurement on the API and get the measurement ID
         _, response = await dfxapi.Measurements.create(session,
-                                                       config["selected_study"],
-                                                       user_profile_id=profile_id,
-                                                       partner_id=partner_id)
+                                                    config["selected_study"],
+                                                    user_profile_id=profile_id,
+                                                    partner_id=partner_id)
         app.measurement_id = response["ID"]
         print(f"Created measurement {app.measurement_id}")
 
@@ -734,7 +738,7 @@ async def run_measurements(config_file, camera_num, md, app_num, status_shm, hr_
             # Subscribe to results
             results_request_id = generate_reqid()
             await dfxapi.Measurements.ws_subscribe_to_results(ws, generate_reqid(), app.measurement_id,
-                                                              results_request_id)
+                                                            results_request_id)
 
             # Queue to pass chunks between coroutines
             chunk_queue = asyncio.Queue(app.number_chunks)
@@ -750,7 +754,7 @@ async def run_measurements(config_file, camera_num, md, app_num, status_shm, hr_
                     30,
                     app,
                     0.5, #if imreader.height >= 720 else 1.0,
-                    suppress=suppress
+                    suppress=True
                 ) if app.is_camera or not headless else NullRenderer()
                 if not app.is_camera:
                     print("Extraction started")
@@ -763,7 +767,7 @@ async def run_measurements(config_file, camera_num, md, app_num, status_shm, hr_
                     collector,  # DFX SDK collector needed to create chunks
                     renderer,  # Rendering
                     app,  # App
-                    status_shm,
+                    status_queue,
                     status_event,
                     landmark_shm, # HR messages
                     landmark_event, # New HR event
@@ -774,13 +778,13 @@ async def run_measurements(config_file, camera_num, md, app_num, status_shm, hr_
             else:  # args.subcommand == "debug_make_from_chunks":
                 renderer = NullRenderer()
                 produce_chunks_coro = read_folder_chunks(chunk_queue, payload_files, meta_files, prop_files,
-                                                         found_props, app)
+                                                        found_props, app)
 
             # Coroutine to get chunks from chunk_queue and send chunk using WebSocket
             async def send_chunks():
                 while True:
                     chunk = await chunk_queue.get()
-                    if chunk is None:
+                    if (end_event.is_set()) or (chunk is None):
                         chunk_queue.task_done()
                         break
 
@@ -789,17 +793,19 @@ async def run_measurements(config_file, camera_num, md, app_num, status_shm, hr_
 
                     # Add data
                     await dfxapi.Measurements.ws_add_data(ws,
-                                                          generate_reqid(),
-                                                          app.measurement_id,
-                                                          action,
-                                                          chunk.payload_data,
-                                                          chunk_order=chunk.chunk_number,
-                                                          start_time_s=chunk.start_time_s,
-                                                          end_time_s=chunk.end_time_s,
-                                                          duration_s=chunk.duration_s,
-                                                          metadata=chunk.metadata)
-                    print(f"Sent chunk {chunk.chunk_number}")
+                                                        generate_reqid(),
+                                                        app.measurement_id,
+                                                        action,
+                                                        chunk.payload_data,
+                                                        chunk_order=chunk.chunk_number,
+                                                        start_time_s=chunk.start_time_s,
+                                                        end_time_s=chunk.end_time_s,
+                                                        duration_s=chunk.duration_s,
+                                                        metadata=chunk.metadata)
+                    print(f"{app_num} Sent chunk {chunk.chunk_number}")
                     renderer.set_sent(chunk.chunk_number)
+                    if app.number_chunks_sent == 0:
+                        status_queue.put_nowait(measuring_in_progress_txt)
 
                     # Update data needed to check for completion
                     app.number_chunks_sent += 1
@@ -807,7 +813,8 @@ async def run_measurements(config_file, camera_num, md, app_num, status_shm, hr_
 
                     ##### RKW make sure the next process gets queued
                     if app.number_chunks_sent == 14:
-                        write_shm_message(status_shm, status_event, process_limit_txt)
+                        #write_shm_message(status_shm, status_event, process_limit_txt)
+                        status_queue.put_nowait(process_limit_txt)
                         print("DEBUG: Process limit sent")
 
                     chunk_queue.task_done()
@@ -829,30 +836,31 @@ async def run_measurements(config_file, camera_num, md, app_num, status_shm, hr_
                         begin_ind = payload.find("HR_IR_CONT_BPM")
                         current_hr = payload[begin_ind + 25:begin_ind + 31]
                         print(f"Payload:\{current_hr}/")
-                        if valid_results == 0:
-                                write_shm_message(status_shm,status_event,measuring_in_progress_txt)
-                                first_status = False
+                        
                         try:
                             int(current_hr)
-                            write_shm_message(hr_shm,hr_event,current_hr)
                             valid_results +=1
+                            write_shm_message(hr_shm,hr_event,current_hr)
                             #print("the above is payload")
                         except Exception as e:
+                            write_shm_message(hr_shm,hr_event,"None")
                             print("No payload yet")
                             print(e)
+                        print(f"Process {app_num}, received chunk")
                         print(payload) if False else PP.print_sdk_result(result)
                         
                         num_results_received += 1
                     # We are done if the last chunk is sent and number of results received equals number of chunks sent
-                    if app.last_chunk_sent and num_results_received == app.number_chunks_sent:
+                    if (app.last_chunk_sent and num_results_received == app.number_chunks_sent) or end_event.is_set():
                         await ws.close()
-                        print("END OF MEASUREMENT HAPPENED")
+                        print("Closing receive result")
                         break
 
                 app.step = MeasurementStep.COMPLETED
                 print("Measurement complete")
                 # If the measurement fails one time, you should run the setup bat again.
-                write_shm_message(status_shm,status_event,error_txt+"Measurement Completed")
+                #write_shm_message(status_shm,status_event,error_txt+"Measurement Completed")
+                status_queue.put_nowait(error_txt+"Measurement Completed")
                 app.step = MeasurementStep.USER_CANCELLED
 
 
@@ -865,17 +873,19 @@ async def run_measurements(config_file, camera_num, md, app_num, status_shm, hr_
                 cv2.destroyAllWindows()
                 if cancelled:
                     tracker.stop()
-                    write_shm_message(status_shm,status_event,error_txt)
+                    #write_shm_message(status_shm,status_event,error_txt)
+                    status_queue.put_nowait(error_txt)
                     print("error sent from demo")
-                    raise ValueError("Measurement was cancelled by user.")
+                    #raise ValueError("Measurement was cancelled by user.")
+                    return
                 
             async def end_process_listener():
                 while True:
-                    if end_event.is_set():
-                        end_event.clear()
+                    if end_event.is_set() or app.step == MeasurementStep.USER_CANCELLED:
+                        #end_event.clear() Don't clear this, let it get cleared in the parent loop
                         app.step = MeasurementStep.USER_CANCELLED
                         renderer.end_render()
-                        raise ValueError("End event raised by user.")
+                        raise ValueError(f"End event raised by user. {app_num}")
                     await asyncio.sleep(1)
                     
 
@@ -887,6 +897,9 @@ async def run_measurements(config_file, camera_num, md, app_num, status_shm, hr_
                 asyncio.create_task(render()),
                 asyncio.create_task(end_process_listener())
             ]
+            print(f"Initialized {app_num}")
+            #write_shm_message(status_shm, status_event,initialzied_txt)
+            status_queue.put_nowait(initialzied_txt)
             done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_EXCEPTION)
             for p in pending:  # If there were any pending coroutines, cancel them here...
                 p.cancel()
@@ -897,15 +910,34 @@ async def run_measurements(config_file, camera_num, md, app_num, status_shm, hr_
                         print(e)
                         # raise e  # Uncomment this to see a stack trace
                 print(f"Measurement {app.measurement_id} failed")
-                write_shm_message(status_shm,status_event,error_txt)
-                raise ValueError("Measurement was cancelled by user.")
+                #write_shm_message(status_shm,status_event,error_txt)
+                status_queue.put_nowait(error_txt)
+                #raise ValueError("Measurement was cancelled by user.")
+                
+                tracker.stop()
+                if len(tasks) > 0:
+                    for t in tasks:
+                        if not t is None:
+                            if not t.done():
+                                try:
+                                    t.cancel()
+                                except asyncio.exceptions.CancelledError:
+                                    pass
+                        else:
+                            print("Task is already done")
+                return
             else:
                 print("ending")
-                #config["last_measurement"] = app.measurement_id
-                #save_config(config, args.config_file)
-                #print(f"Measurement {app.measurement_id} completed")
-                #print(f"Use 'dfxdemo measure get' to get comprehensive results")
 
+
+def measurement_loop(config_file, camera_num, md, app_num, status_shm, hr_shm, start_event, status_event, hr_event, coordinator_shm,seconds_to_wait_before_starting, landmark_shm, landmark_event, end_event, reset_event,suppress):
+    while True:
+        asyncio.run(run_measurements(config_file, camera_num, md, app_num, status_shm, hr_shm, start_event, status_event, hr_event, coordinator_shm,seconds_to_wait_before_starting, landmark_shm, landmark_event, reset_event,suppress))
+
+        if end_event.is_set():
+            end_event.clear()
+            break
+        reset_event.clear()
 
 def load_config(config_file):
     config = {
@@ -1180,7 +1212,7 @@ async def retrieve_sdk_config(headers, config, config_file, sdk_id):
         return base64.standard_b64decode(config["study_cfg_data"])
 
 
-async def extract_from_imgs(chunk_queue, imreader, tracker, collector, renderer, app, status_shm, status_event, landmark_shm, landmark_event, start_event, coordinator_shm, sec_to_wait_before_starting):
+async def extract_from_imgs(chunk_queue, imreader, tracker, collector, renderer, app, status_queue, status_event, landmark_shm, landmark_event, start_event, coordinator_shm, sec_to_wait_before_starting):
     # Set channel order based on is_infrared, is_camera and virtual
     channelOrder = dfxsdk.ChannelOrder.CHANNEL_ORDER_BGR
     if app.is_infrared:
@@ -1196,7 +1228,6 @@ async def extract_from_imgs(chunk_queue, imreader, tracker, collector, renderer,
     # Adding a variable to automatically start the measurements if a face is found for a while
     consecutive_frames_of_face = 0
     fps = 30
-    write_shm_message(status_shm, status_event, initialzied_txt)
     while True:
         # Grab a frame
         read, image, frame_number, frame_timestamp_ns = await imreader.read_next_frame()
@@ -1254,6 +1285,8 @@ async def extract_from_imgs(chunk_queue, imreader, tracker, collector, renderer,
                 if c_result == dfxsdk.ConstraintResult.ERROR:
                     app.step = MeasurementStep.FAILED
                     reasons = DfxSdkHelpers.failure_causes_from_constraints(c_details)
+                    #write_shm_message(status_shm,status_event,error_txt+reasons)
+                    status_queue.put_nowait(error_txt+reasons)
                     print(reasons)
         else:
             if app.step == MeasurementStep.NOT_READY and len(tracked_faces) > 0:
@@ -1283,28 +1316,33 @@ async def extract_from_imgs(chunk_queue, imreader, tracker, collector, renderer,
                         imreader.stop()
                         #RKW close the program if the chunks are found
                     print("Cancelling due to finish")
-                    write_shm_message(status_shm, status_event,end_process_txt)
+                    #write_shm_message(status_shm, status_event,end_process_txt)
+                    status_queue.put_nowait(end_process_txt)
                     app.step = MeasurementStep.USER_CANCELLED
                     break
             elif result == dfxsdk.CollectorState.ERROR:
                 print("Cancelling due to Error")
-                write_shm_message(status_shm,status_event,error_txt)
                 app.step = MeasurementStep.FAILED
                 print("E DEBUG")
-                reasons = "Failed because " + dfxsdk.Collector.getLastErrorMessage()
+                #reasons = "Failed because " + dfxsdk.Collector.getLastErrorMessage()
+                reasons = "Failed because " + collector.getLastErrorMessage()
+                #write_shm_message(status_shm,status_event,error_txt+reasons)
+                status_queue.put_nowait(error_txt+reasons)
                 app.step = MeasurementStep.USER_CANCELLED
 
         # RKW end if there is an end message
-        if start_event.is_set() and get_status_message(coordinator_shm) == end_process_txt:
-            start_event.clear()
-            app.step = MeasurementStep.USER_CANCELLED
+        # if start_event.is_set() and get_status_message(coordinator_shm) == end_process_txt:
+        #     start_event.clear()
+        #     app.step = MeasurementStep.USER_CANCELLED
         if app.step == MeasurementStep.FAILED:
             print("Cancelling due to Error")
-            write_shm_message(status_shm,status_event,error_txt)
+            #write_shm_message(status_shm,status_event,error_txt)
+            status_queue.put_nowait(error_txt)
             app.step = MeasurementStep.USER_CANCELLED
         if app.step == MeasurementStep.COMPLETED:
             print("oh no it completed")
-            write_shm_message(status_shm, status_event,end_process_txt)
+            #write_shm_message(status_shm, status_event,end_process_txt)
+            status_queue.put_nowait(end_process_txt)
             app.step = MeasurementStep.USER_CANCELLED
 
         await renderer.put_nowait((image, (dfx_frame, frame_number, frame_timestamp_ns)))

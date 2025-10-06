@@ -270,7 +270,16 @@ class MediaPipeTracker():
 
     def stop(self):
         if self._track_in_background and self._track_proc and self._track_proc.is_alive():
-            self._work_queue.put((None, None, None))
+            # changed following to put as put_nowait. hopefully it doesn't break anything.
+            try:
+                self._work_queue.put((None, None, None),False)
+            except queue.Full:
+                try:
+                    self._work_queue.get(False)
+                except queue.Empty:
+                    pass
+                self._work_queue.put((None, None, None))
+                pass
             self._track_proc.terminate()
             self._work_queue.cancel_join_thread()
             self._results_queue.cancel_join_thread()
