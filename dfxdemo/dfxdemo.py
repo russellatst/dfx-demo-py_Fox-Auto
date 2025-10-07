@@ -23,8 +23,6 @@ from dfxutils.renderer import NullRenderer, Renderer
 from dfxutils.sdkhelpers import DfxSdkHelpers
 
 import pickle
-import time
-import multiprocessing
 
 changed_max_duration = 130
 
@@ -859,7 +857,6 @@ async def run_measurements(config_file, camera_num, md, app_num, status_queue, h
                 app.step = MeasurementStep.COMPLETED
                 print("Measurement complete")
                 # If the measurement fails one time, you should run the setup bat again.
-                #write_shm_message(status_shm,status_event,error_txt+"Measurement Completed")
                 status_queue.put_nowait(error_txt+"Measurement Completed")
                 app.step = MeasurementStep.USER_CANCELLED
 
@@ -1301,6 +1298,7 @@ async def extract_from_imgs(chunk_queue, imreader, tracker, collector, renderer,
                 for regionID in dfx_frame.getRegionNames(faceID):
                     if dfx_frame.getRegionIntProperty(faceID, regionID, "draw") != 0:
                         polygons.append(dfx_frame.getRegionPolygon(faceID, regionID))
+
             serialized_obj = pickle.dumps(polygons)
             landmark_shm.buf[:len(serialized_obj)] = serialized_obj
             landmark_event.set()

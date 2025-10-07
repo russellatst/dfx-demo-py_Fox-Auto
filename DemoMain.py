@@ -42,9 +42,6 @@ _polygon_persist_counter_max = 3
 ARRAY_SIZE = 512
 # Create shared memory and event flags to 2 processes
 # Status from worker to coordinator
-status_shm_1 = shared_memory.SharedMemory(create = True, size=ARRAY_SIZE * np.dtype(np.int32).itemsize)
-status_shm_2 = shared_memory.SharedMemory(create = True, size=ARRAY_SIZE * np.dtype(np.int32).itemsize)
-status_shm_gui = shared_memory.SharedMemory(create = True, size=ARRAY_SIZE * np.dtype(np.int32).itemsize)
 coordinator_worker_shm_1 = shared_memory.SharedMemory(create = True, size=ARRAY_SIZE * np.dtype(np.int32).itemsize)
 coordinator_worker_shm_2 = shared_memory.SharedMemory(create = True, size=ARRAY_SIZE * np.dtype(np.int32).itemsize)
 landmark_shm_1 = shared_memory.SharedMemory(create = True, size=ARRAY_SIZE * np.dtype(np.int32).itemsize)
@@ -54,7 +51,7 @@ landmark_shm_gui = shared_memory.SharedMemory(create = True, size=ARRAY_SIZE * n
 hr_shm_1 = shared_memory.SharedMemory(create = True, size=ARRAY_SIZE * np.dtype(np.int32).itemsize)
 hr_shm_2 = shared_memory.SharedMemory(create = True, size=ARRAY_SIZE * np.dtype(np.int32).itemsize)
 hr_shm_gui = shared_memory.SharedMemory(create = True, size=ARRAY_SIZE * np.dtype(np.int32).itemsize)
-all_shm = [status_shm_1,status_shm_2,status_shm_gui,coordinator_worker_shm_1,coordinator_worker_shm_2,landmark_shm_1,landmark_shm_gui,
+all_shm = [coordinator_worker_shm_1,coordinator_worker_shm_2,landmark_shm_1,landmark_shm_gui,
             hr_shm_1,hr_shm_2,hr_shm_gui]
 # Making Queues instead of shms for states
 status_queue_1 = multiprocessing.Queue()
@@ -80,8 +77,8 @@ status_event_1 = multiprocessing.Event() # This event is sent from worker to coo
 status_event_1.clear()
 status_event_2 = multiprocessing.Event()
 status_event_2.clear()
-status_event_gui = multiprocessing.Event()
-status_event_gui.clear()
+reset_active_event = multiprocessing.Event()
+reset_active_event.clear()
 landmark_event_1 = multiprocessing.Event() # This event is sent from worker to coordinator to read a new status
 landmark_event_1.clear()
 landmark_event_2 = multiprocessing.Event()
@@ -163,20 +160,14 @@ class HRM_Proc():
     def stop_process(self,permanent_close=False):
         print(f"ENDING Task {self.app_num}")
         try:
-            #self.task.cancel()
             if self.proc != None:
                 self.is_initialized = False
                 self.write_shm_message(self.coordinator_shm, self.end_event, end_process_str)
-                self.end_event.set()
-                self.reset_hrm_event.set()
-                self.proc.terminate()
+                self.proc.terminate() # Tells the process to end
+                self.end_event.set() # Tells the loop managing DFX to end
+                self.reset_hrm_event.set() # Tells DFX to end
             else:
-                print(f"Tried to stop {self.app_num}, but it wasn't going.")
-            #if not self.task.done():
-            #    print("Task not done so cancelling it")
-            #    self.task.cancel()
-            #else:
-            #    print(f"Tried to end PROC {self.app_num} but it was never started")
+                print(f"Tried to stop {self.app_num}, but it hasn't started.")
         except Exception as e:
             print(f"!!!!! Failure ending PROC {self.app_num}")
             raise e
@@ -191,8 +182,6 @@ class HRM_Proc():
         return s
     
     def get_status_message(self):
-        # s = str(bytes(self.status_shm.buf[:]).decode()).replace("\x00", "")
-        # self.status_shm.buf[:] = bytearray(self.status_shm.buf.nbytes)
         try:
             s = self.status_queue.get_nowait()
             return s
@@ -286,7 +275,7 @@ class gui_state(enum.Enum):
         HEART_RATE_MONITORING_IN_PROGRESS = 3,
         ERROR = -1
             
-def manage_hr_process(hr_shm_gui, hr_event_gui, landmark_shm_gui, landmark_event_gui, manager_end_event,status_queue_gui,status_event_gui):
+def manage_hr_process(hr_shm_gui, hr_event_gui, landmark_shm_gui, landmark_event_gui, manager_end_event,status_queue_gui,reset_active_event):
     worker_1 = HRM_Proc(status_queue_1, hr_shm_1,coordinator_worker_shm_1,start_event_1,status_event_1,hr_ready_event_1,1,landmark_shm_gui, landmark_event_gui, end_event_1,join_event_1, suppress=suppress)
     worker_2 = HRM_Proc(status_queue_2, hr_shm_2,coordinator_worker_shm_2,start_event_2,status_event_2,hr_ready_event_2,2,landmark_shm_gui, landmark_event_gui, end_event_2,join_event_2, suppress=suppress)
     worker_arr = [worker_1, worker_2]
@@ -297,9 +286,6 @@ def manage_hr_process(hr_shm_gui, hr_event_gui, landmark_shm_gui, landmark_event
     worker_arr[inactive_app - 1].launch_process(wait_for_user_time)
     print("manager starting")
     state = coordinator_state.INITIALIZING
-    #write_shm_message(status_shm_gui,status_event_gui,gui_state.INITIALIZING.name)
-    #put_queue_message(status_queue_gui,gui_state.INITIALIZING.name)
-    #current_gui_state = gui_state.INITIALIZING
     last_state = coordinator_state.INITIALIZING
     while True:
         #if worker_arr[active_app - 1].status_event.is_set():
@@ -309,14 +295,10 @@ def manage_hr_process(hr_shm_gui, hr_event_gui, landmark_shm_gui, landmark_event
             print(f"Active app ({active_app}) message received: {active_message_str}")
             # Initialization finished
             if active_message_str == initialzied_txt and state == coordinator_state.INITIALIZING:
-                #write_shm_message(status_shm_gui,status_event_gui,gui_state.WAITING_FOR_SUBJECT.name)
-                #put_queue_message(status_queue_gui,gui_state.WAITING_FOR_SUBJECT.name)
                 worker_arr[active_app - 1].start_event.set()
                 state = coordinator_state.WAITING_FOR_USER
             # A user is found and measurement has begun
             elif active_message_str == measuring_in_progress_str and state == coordinator_state.WAITING_FOR_USER:
-                #write_shm_message(status_shm_gui,status_event_gui,gui_state.ANALYZING.name)
-                #put_queue_message(status_queue_gui,gui_state.ANALYZING.name)
                 lock_camera_autoexposure()
                 print("Measuring in progress started.")
                 state = coordinator_state.ACTIVE_MEASURING
@@ -345,8 +327,6 @@ def manage_hr_process(hr_shm_gui, hr_event_gui, landmark_shm_gui, landmark_event
                 print(f"Restarting active app: {active_app}")
                 enable_camera_autoexposure()
                 if state == coordinator_state.START_INACTIVE:
-                    #write_shm_message(status_shm_gui,status_event_gui,gui_state.INITIALIZING.name)
-                    #put_queue_message(status_queue_gui,gui_state.INITIALIZING)
                     worker_arr[active_app - 1].reset_hrm()
                     worker_arr[inactive_app - 1].reset_hrm()
                     state = coordinator_state.INITIALIZING
@@ -357,12 +337,8 @@ def manage_hr_process(hr_shm_gui, hr_event_gui, landmark_shm_gui, landmark_event
                     worker_arr[inactive_app - 1].start_event.clear()
                     if worker_arr[active_app - 1].is_initialized:
                         state = coordinator_state.WAITING_FOR_USER
-                        #write_shm_message(status_shm_gui,status_event_gui,gui_state.WAITING_FOR_SUBJECT.name)
-                        #put_queue_message(status_queue_gui,gui_state.WAITING_FOR_SUBJECT)
                     else:
                         state = coordinator_state.INITIALIZING
-                        #write_shm_message(status_shm_gui,status_event_gui,gui_state.INITIALIZING.name)
-                        #put_queue_message(status_queue_gui,gui_state.INITIALIZING)
                     # handle the now inactive app.
                     worker_arr[inactive_app - 1].reset_hrm()
                     worker_arr[active_app - 1].start_event.set()
@@ -405,7 +381,6 @@ def manage_hr_process(hr_shm_gui, hr_event_gui, landmark_shm_gui, landmark_event
                     worker_arr[inactive_app - 1].current_state = app_state.ERROR
             print(f"Inactive app {inactive_app} state: {state}")
 
-        
         if worker_arr[active_app - 1].landmark_event.is_set():
             landmark_shm_gui.buf[:] = worker_arr[active_app - 1].landmark_shm.buf[:]
             landmark_event_gui.set()
@@ -420,6 +395,24 @@ def manage_hr_process(hr_shm_gui, hr_event_gui, landmark_shm_gui, landmark_event
             for w in worker_arr:
                 w.proc.join()
             return
+        # Handle face jumping
+        # If face jump is found during an active measurement state: end the process and switch or end both processes
+        if reset_active_event.is_set():
+            reset_active_event.clear()
+            print("!!!!Face has jumped!!!!")
+            if (state == coordinator_state.ACTIVE_MEASURING):
+                print("switching apps and going into a new state")
+                worker_arr[active_app - 1].start_event.clear()
+                worker_arr[active_app - 1].reset_hrm()
+                active_app, inactive_app = set_active_process(inactive_app)
+                state = coordinator_state.WAITING_FOR_USER
+                worker_arr[active_app - 1].start_event.set()
+            elif state == coordinator_state.START_INACTIVE:
+                print("Resetting both processes")
+                worker_arr[active_app - 1].reset_hrm()
+                worker_arr[inactive_app - 1].reset_hrm()
+                state = coordinator_state.INITIALIZING
+
         # Handling GUI states
         if last_state != state:
             print(f"Updating state from {last_state.name} to {state.name}")
@@ -440,7 +433,7 @@ def manage_hr_process(hr_shm_gui, hr_event_gui, landmark_shm_gui, landmark_event
 
         time.sleep(1)
 
-def gui_process(hr_shm, hr_event, status_queue_gui, status_ready,landmark_shm_gui,landmark_event_gui,end_manager_event):
+def gui_process(hr_shm, hr_event, status_queue_gui, reset_active_event,landmark_shm_gui,landmark_event_gui,end_manager_event):
     output_x = 1920
     output_y = 1080
     frame_offset_y = 20
@@ -504,11 +497,24 @@ def gui_process(hr_shm, hr_event, status_queue_gui, status_ready,landmark_shm_gu
         
         polygons = pickle.loads(landmark_shm_gui.buf[:]) if landmark_event_gui.is_set() else None
         face_found = False
+        face_jumped = False
         
         live_image = cv2.flip(live_image, 1)
         if polygons is not None and len(polygons) > 1:
             live_image = draw_polygons_mask(polygons, live_image)
             landmark_event_gui.clear()
+            if last_polygons is not None:
+            # Check if the face has moved too far
+                all_points = np.array([point for polygon in polygons for point in polygon])
+                current_all_points_avg = (np.mean(all_points[:,0]),np.mean(all_points[:,1]))
+                all_points = np.array([point for polygon in last_polygons for point in polygon])
+                last_all_points_avg = (np.mean(all_points[:,0]),np.mean(all_points[:,1]))
+                if np.absolute(last_all_points_avg[0] - current_all_points_avg[0] + last_all_points_avg[1] - current_all_points_avg[1]) > 50:
+                    face_jumped = True
+                    print(f"Last center: {last_all_points_avg}")
+                    print(f"New center: {current_all_points_avg}")
+                else:
+                    last_all_points_avg = current_all_points_avg
             last_polygons = polygons
             face_found = True
             polygon_persist_counter = _polygon_persist_counter_max
@@ -561,7 +567,7 @@ def gui_process(hr_shm, hr_event, status_queue_gui, status_ready,landmark_shm_gu
                     bpm_text_coord,
                     FONT, 5, white, THICK, AA)
 
-        return last_polygons, polygon_persist_counter
+        return last_polygons, polygon_persist_counter, face_jumped
         
     
     state = gui_state.INITIALIZING
@@ -648,7 +654,9 @@ def gui_process(hr_shm, hr_event, status_queue_gui, status_ready,landmark_shm_gu
             #             status_text_coord[1] : status_text_coord[1] + plot.shape[1],:] = plot
             
         frame = cv2.resize(frame, dsize=live_image_dim)
-        last_polygons, polygon_persist_counter = draw_frame(frame, state, hr_txt, last_polygons, polygon_persist_counter)
+        last_polygons, polygon_persist_counter, face_jumped = draw_frame(frame, state, hr_txt, last_polygons, polygon_persist_counter)
+        if face_jumped and ((state == gui_state.ANALYZING) or (state == gui_state.HEART_RATE_MONITORING_IN_PROGRESS)):
+            reset_active_event.set()
         cv2.imshow("Result", display_frame)
         k = cv2.waitKey(1) & 0xFF
         if k == ord('q'):
@@ -665,9 +673,9 @@ if __name__ == "__main__":
     status_queue_gui = multiprocessing.Queue()
     # Establish worker processes
     set_active_process(1)
-    hr_coordinator_proc = Process(target=manage_hr_process, name="hr_proc", args=(hr_shm_gui, hr_ready_event_gui,landmark_shm_gui, landmark_event_gui,hr_end_event,status_queue_gui,status_event_gui))
+    hr_coordinator_proc = Process(target=manage_hr_process, name="hr_proc", args=(hr_shm_gui, hr_ready_event_gui,landmark_shm_gui, landmark_event_gui,hr_end_event,status_queue_gui,reset_active_event))
     hr_coordinator_proc.start()
-    gui_process(hr_shm_gui,hr_ready_event_gui,status_queue_gui,status_event_gui,landmark_shm_gui,landmark_event_gui,hr_end_event)
+    gui_process(hr_shm_gui,hr_ready_event_gui,status_queue_gui,reset_active_event,landmark_shm_gui,landmark_event_gui,hr_end_event)
     # gui_proc = Process(target=gui_process, name="gui_proc",args=(hr_shm_gui,hr_ready_event_gui,status_shm_gui,status_event_gui,landmark_shm_gui,landmark_event_gui,hr_end_event))
     # gui_proc.start()
     # asyncio.run(manage_hr_process(hr_shm_gui, hr_ready_event_gui,landmark_shm_gui, landmark_event_gui,hr_end_event,status_shm_gui,status_event_gui))
