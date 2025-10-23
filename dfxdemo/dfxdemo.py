@@ -575,356 +575,360 @@ async def main(args):
 
 ### RKW making a slimmed down run version
 async def run_measurements(config_file, camera_num, md, app_num, status_queue, hr_shm, start_event, status_event, hr_event, coordinator_shm,seconds_to_wait_before_starting, landmark_shm, landmark_event, end_event,suppress):
-    # Load config
-    config = load_config(config_file)
+    try:
+        # Load config
+        config = load_config(config_file)
 
-    first_status = True
+        first_status = True
 
-    # Check API status
-    async with aiohttp.ClientSession(raise_for_status=True) as session:
-        _, api_status = await dfxapi.General.api_status(session)
-        if not api_status["StatusID"] == "ACTIVE":
-            print(f"DFX API Status: {api_status['StatusID']} ({dfxapi.Settings.rest_url})")
+        # Check API status
+        async with aiohttp.ClientSession(raise_for_status=True) as session:
+            _, api_status = await dfxapi.General.api_status(session)
+            if not api_status["StatusID"] == "ACTIVE":
+                print(f"DFX API Status: {api_status['StatusID']} ({dfxapi.Settings.rest_url})")
 
+                return
+
+        # The commands below need a token, so make sure we are registered and/or logged in
+        if not dfxapi.Settings.device_token and not dfxapi.Settings.user_token:
+            print("Please register and/or login first to obtain a token")
             return
 
-    # The commands below need a token, so make sure we are registered and/or logged in
-    if not dfxapi.Settings.device_token and not dfxapi.Settings.user_token:
-        print("Please register and/or login first to obtain a token")
-        return
+        # Verify and if necessary, attempt to renew the token
+        using_user_token = bool(dfxapi.Settings.user_token)
+        verified, renewed, headers, new_config = await verify_renew_token(config, using_user_token)
+        if not verified:
+            if new_config is not None:
+                save_config(new_config, config_file)
+            if not renewed:
+                print("!!!!!!!!!!")
+                #write_shm_message(status_shm, status_event,error_txt)
+                status_queue.put_nowait(error_txt)
+                return
 
-    # Verify and if necessary, attempt to renew the token
-    using_user_token = bool(dfxapi.Settings.user_token)
-    verified, renewed, headers, new_config = await verify_renew_token(config, using_user_token)
-    if not verified:
-        if new_config is not None:
-            save_config(new_config, config_file)
-        if not renewed:
-            print("!!!!!!!!!!")
-            #write_shm_message(status_shm, status_event,error_txt)
-            status_queue.put_nowait(error_txt)
+        # Verify preconditions
+        # 1. Make sure we have a valid device_token
+        if not dfxapi.Settings.device_token:
+            print("Please register first to obtain a device_token")
             return
 
-    # Verify preconditions
-    # 1. Make sure we have a valid device_token
-    if not dfxapi.Settings.device_token:
-        print("Please register first to obtain a device_token")
-        return
+        # 2. Make sure a study is selected
+        if not config["selected_study"]:
+            print("Please select a study first using 'study select'")
+            return
+        
+        profile_id = ""
+        # 3. Check if the profile_id if selected, actually exists
+        if profile_id != "":
+            try:
+                async with aiohttp.ClientSession(headers=headers, raise_for_status=False) as session:
+                    status, body = await dfxapi.Profiles.retrieve(session, profile_id)
+                    if status >= 400:
+                        print(f"Could not verify that profile ${profile_id} exists")
+                        print(body)
+                        return
+            except Exception as e:  # This try catch code path can be removed once the bug on the API is fixed
+                print(f"Could not verify that profile ${profile_id} exists")
+                print(e)
+                return
 
-    # 2. Make sure a study is selected
-    if not config["selected_study"]:
-        print("Please select a study first using 'study select'")
-        return
-    
-    profile_id = ""
-    # 3. Check if the profile_id if selected, actually exists
-    if profile_id != "":
+        # Prepare to make a measurement..
+        app = AppState()
+
+        # ..using a video or camera
+        app.is_camera = True
+        app.is_infrared = True
+        app.virtual = "564x682@30"
+        headless = cv2.version.headless # RKW may want to run headless -> or "headless" in args and args.headless
+        image_src_name = f"Camera {camera_num}"
+        face_tracker = "mediapipe"
         try:
-            async with aiohttp.ClientSession(headers=headers, raise_for_status=False) as session:
-                status, body = await dfxapi.Profiles.retrieve(session, profile_id)
-                if status >= 400:
-                    print(f"Could not verify that profile ${profile_id} exists")
-                    print(body)
-                    return
-        except Exception as e:  # This try catch code path can be removed once the bug on the API is fixed
-            print(f"Could not verify that profile ${profile_id} exists")
+            # Open the camera or video
+            width, height, fps = None, None, None
+            width, height, fps = map(int, app.virtual.replace('@', 'x').split('x'))
+            imreader = CameraReader(camera_num, mirror=True, fps=fps, width=width,
+                                        height=height)
+
+            tracker = MediaPipeTracker(1, track_in_background=app.is_camera)
+
+            # Create DFX SDK factory
+            factory = dfxsdk.Factory()
+            print("Created DFX Factory:", factory.getVersion())
+            sdk_id = factory.getSdkId()
+
+            # Get study config data..
+            study_cfg_bytes = await retrieve_sdk_config(headers, config, config_file, sdk_id)
+        except Exception as e:
             print(e)
             return
 
-    # Prepare to make a measurement..
-    app = AppState()
-
-    # ..using a video or camera
-    app.is_camera = True
-    app.is_infrared = True
-    app.virtual = "564x682@30"
-    headless = cv2.version.headless # RKW may want to run headless -> or "headless" in args and args.headless
-    image_src_name = f"Camera {camera_num}"
-    face_tracker = "mediapipe"
-    try:
-        # Open the camera or video
-        width, height, fps = None, None, None
-        width, height, fps = map(int, app.virtual.replace('@', 'x').split('x'))
-        imreader = CameraReader(camera_num, mirror=True, fps=fps, width=width,
-                                    height=height)
-
-        tracker = MediaPipeTracker(1, track_in_background=app.is_camera)
-
-        # Create DFX SDK factory
-        factory = dfxsdk.Factory()
-        print("Created DFX Factory:", factory.getVersion())
-        sdk_id = factory.getSdkId()
-
-        # Get study config data..
-        study_cfg_bytes = await retrieve_sdk_config(headers, config, config_file, sdk_id)
-    except Exception as e:
-        print(e)
-        return
-
-    # Create DFX SDK collector (or FAIL)
-    if not factory.initializeStudy(study_cfg_bytes):
-        print(f"DFX factory creation failed: {factory.getLastErrorMessage()}")
-        return
-    factory.setMode("discrete")
-    collector = factory.createCollector()
-    if collector.getCollectorState() == dfxsdk.CollectorState.ERROR:
-        print("C DEBUG")
-        print(f"DFX collector creation failed: {collector.getLastErrorMessage()}")
-        return
-
-    measurement_duration_s = md
-    chunk_duration_s = 5.0
-    print(f"Face Tracker: {face_tracker}")
-    print("Created DFX Collector:")
-    chunk_duration_s = float(chunk_duration_s)
-    frames_per_chunk = math.ceil(chunk_duration_s * imreader.fps)
-    if app.is_camera:
-        app.number_chunks = math.ceil(measurement_duration_s / chunk_duration_s)
-        app.end_frame = math.ceil(measurement_duration_s * imreader.fps)
-    else:
-        app.number_chunks = math.ceil(imreader.frames_to_process / frames_per_chunk)
-        app.begin_frame = imreader.start_frame
-        app.end_frame = imreader.stop_frame
-
-    # Set collector config
-    collector.setTargetFPS(imreader.fps)
-    collector.setChunkDurationSeconds(chunk_duration_s)
-    collector.setNumberChunks(app.number_chunks)
-    print(f"    mode: {factory.getMode()}")
-    print(f"    number chunks: {collector.getNumberChunks()}")
-    print(f"    chunk duration: {collector.getChunkDurationSeconds()}s")
-
-    # Set the demographics
-    if app.demographics is not None:
-        print("    Setting user demographics:")
-        if not DfxSdkHelpers.set_user_demographics(collector, app.demographics):
-            print("D DEBUG")
-            print("Failed to set user demographics because " + collector.getLastErrorMessage())
+        # Create DFX SDK collector (or FAIL)
+        if not factory.initializeStudy(study_cfg_bytes):
+            print(f"DFX factory creation failed: {factory.getLastErrorMessage()}")
+            return
+        factory.setMode("discrete")
+        collector = factory.createCollector()
+        if collector.getCollectorState() == dfxsdk.CollectorState.ERROR:
+            print("C DEBUG")
+            print(f"DFX collector creation failed: {collector.getLastErrorMessage()}")
             return
 
-            # Set the collector constraints config
-    if app.is_camera:
-        app.constraints_cfg = DfxSdkHelpers.ConstraintsConfig(collector.getConstraintsConfig("json"))
-        app.constraints_cfg.minimumFps = 10
-        app.constraints_cfg.boxWidth_pct = 100  # added this line RKW
-        app.constraints_cfg.boxHeight_pct = 100  # added this line RKW
-        collector.setConstraintsConfig("json", str(app.constraints_cfg))
+        measurement_duration_s = md
+        chunk_duration_s = 5.0
+        print(f"Face Tracker: {face_tracker}")
+        print("Created DFX Collector:")
+        chunk_duration_s = float(chunk_duration_s)
+        frames_per_chunk = math.ceil(chunk_duration_s * imreader.fps)
+        if app.is_camera:
+            app.number_chunks = math.ceil(measurement_duration_s / chunk_duration_s)
+            app.end_frame = math.ceil(measurement_duration_s * imreader.fps)
+        else:
+            app.number_chunks = math.ceil(imreader.frames_to_process / frames_per_chunk)
+            app.begin_frame = imreader.start_frame
+            app.end_frame = imreader.stop_frame
 
-    # Print the enabled constraints
-    print("Constraints:")
-    for constraint in collector.getEnabledConstraints():
-        print(f"    enabled: {constraint}")
+        # Set collector config
+        collector.setTargetFPS(imreader.fps)
+        collector.setChunkDurationSeconds(chunk_duration_s)
+        collector.setNumberChunks(app.number_chunks)
+        print(f"    mode: {factory.getMode()}")
+        print(f"    number chunks: {collector.getNumberChunks()}")
+        print(f"    chunk duration: {collector.getChunkDurationSeconds()}s")
 
-    partner_id = ""
-    # Make a measurement
-    async with aiohttp.ClientSession(headers=headers, raise_for_status=True) as session:
-        # Create a measurement on the API and get the measurement ID
-        _, response = await dfxapi.Measurements.create(session,
-                                                    config["selected_study"],
-                                                    user_profile_id=profile_id,
-                                                    partner_id=partner_id)
-        app.measurement_id = response["ID"]
-        print(f"Created measurement {app.measurement_id}")
+        # Set the demographics
+        if app.demographics is not None:
+            print("    Setting user demographics:")
+            if not DfxSdkHelpers.set_user_demographics(collector, app.demographics):
+                print("D DEBUG")
+                print("Failed to set user demographics because " + collector.getLastErrorMessage())
+                return
 
-        # Use the session to connect to the WebSocket
-        async with dfxapi.Measurements.ws_connect(session) as ws:
-            # Auth using `ws_auth_with_token` if headers cannot be manipulated, normally you don't need to do this
-            # if "Authorization" not in session.headers:
-            #     await dfxapi.Organizations.ws_auth_with_token(ws, generate_reqid())
-            #     await ws.receive()  # Wait to receive response before proceeding..
+                # Set the collector constraints config
+        if app.is_camera:
+            app.constraints_cfg = DfxSdkHelpers.ConstraintsConfig(collector.getConstraintsConfig("json"))
+            app.constraints_cfg.minimumFps = 10
+            app.constraints_cfg.boxWidth_pct = 100  # added this line RKW
+            app.constraints_cfg.boxHeight_pct = 100  # added this line RKW
+            collector.setConstraintsConfig("json", str(app.constraints_cfg))
 
-            # Subscribe to results
-            results_request_id = generate_reqid()
-            await dfxapi.Measurements.ws_subscribe_to_results(ws, generate_reqid(), app.measurement_id,
-                                                            results_request_id)
+        # Print the enabled constraints
+        print("Constraints:")
+        for constraint in collector.getEnabledConstraints():
+            print(f"    enabled: {constraint}")
 
-            # Queue to pass chunks between coroutines
-            chunk_queue = asyncio.Queue(app.number_chunks)
+        partner_id = ""
+        # Make a measurement
+        async with aiohttp.ClientSession(headers=headers, raise_for_status=True) as session:
+            # Create a measurement on the API and get the measurement ID
+            _, response = await dfxapi.Measurements.create(session,
+                                                        config["selected_study"],
+                                                        user_profile_id=profile_id,
+                                                        partner_id=partner_id)
+            app.measurement_id = response["ID"]
+            print(f"Created measurement {app.measurement_id}")
 
-            # When we receive the last chunk from the SDK, we can check for measurement completion
-            app.last_chunk_sent = False
+            # Use the session to connect to the WebSocket
+            async with dfxapi.Measurements.ws_connect(session) as ws:
+                # Auth using `ws_auth_with_token` if headers cannot be manipulated, normally you don't need to do this
+                # if "Authorization" not in session.headers:
+                #     await dfxapi.Organizations.ws_auth_with_token(ws, generate_reqid())
+                #     await ws.receive()  # Wait to receive response before proceeding..
 
-            # Coroutine to produce chunks and put then in chunk_queue
-            if True:
-                renderer = Renderer(
-                    _version,
-                    image_src_name,
-                    30,
-                    app,
-                    0.5, #if imreader.height >= 720 else 1.0,
-                    suppress=True
-                ) if app.is_camera or not headless else NullRenderer()
-                if not app.is_camera:
-                    print("Extraction started")
-                else:
-                    print("Waiting to start")
-                produce_chunks_coro = extract_from_imgs(
-                    chunk_queue,  # Chunks will be put into this queue
-                    imreader,  # Image reader
-                    tracker,  # Face tracker
-                    collector,  # DFX SDK collector needed to create chunks
-                    renderer,  # Rendering
-                    app,  # App
-                    status_queue,
-                    status_event,
-                    landmark_shm, # HR messages
-                    landmark_event, # New HR event
-                    start_event, # Flag of when to start
-                    coordinator_shm, # messages from coordinator
-                    seconds_to_wait_before_starting
-                    ) 
-            else:  # args.subcommand == "debug_make_from_chunks":
-                renderer = NullRenderer()
-                produce_chunks_coro = read_folder_chunks(chunk_queue, payload_files, meta_files, prop_files,
-                                                        found_props, app)
+                # Subscribe to results
+                results_request_id = generate_reqid()
+                await dfxapi.Measurements.ws_subscribe_to_results(ws, generate_reqid(), app.measurement_id,
+                                                                results_request_id)
 
-            # Coroutine to get chunks from chunk_queue and send chunk using WebSocket
-            async def send_chunks():
-                while True:
-                    chunk = await chunk_queue.get()
-                    if (end_event.is_set()) or (chunk is None):
+                # Queue to pass chunks between coroutines
+                chunk_queue = asyncio.Queue(app.number_chunks)
+
+                # When we receive the last chunk from the SDK, we can check for measurement completion
+                app.last_chunk_sent = False
+
+                # Coroutine to produce chunks and put then in chunk_queue
+                if True:
+                    renderer = Renderer(
+                        _version,
+                        image_src_name,
+                        30,
+                        app,
+                        0.5, #if imreader.height >= 720 else 1.0,
+                        suppress=True
+                    ) if app.is_camera or not headless else NullRenderer()
+                    if not app.is_camera:
+                        print("Extraction started")
+                    else:
+                        print("Waiting to start")
+                    produce_chunks_coro = extract_from_imgs(
+                        chunk_queue,  # Chunks will be put into this queue
+                        imreader,  # Image reader
+                        tracker,  # Face tracker
+                        collector,  # DFX SDK collector needed to create chunks
+                        renderer,  # Rendering
+                        app,  # App
+                        status_queue,
+                        status_event,
+                        landmark_shm, # HR messages
+                        landmark_event, # New HR event
+                        start_event, # Flag of when to start
+                        coordinator_shm, # messages from coordinator
+                        seconds_to_wait_before_starting
+                        ) 
+                else:  # args.subcommand == "debug_make_from_chunks":
+                    renderer = NullRenderer()
+                    produce_chunks_coro = read_folder_chunks(chunk_queue, payload_files, meta_files, prop_files,
+                                                            found_props, app)
+
+                # Coroutine to get chunks from chunk_queue and send chunk using WebSocket
+                async def send_chunks():
+                    while True:
+                        chunk = await chunk_queue.get()
+                        if (end_event.is_set()) or (chunk is None):
+                            chunk_queue.task_done()
+                            break
+
+                        # Determine action and request id
+                        action = determine_action(chunk.chunk_number, chunk.number_chunks)
+
+                        # Add data
+                        await dfxapi.Measurements.ws_add_data(ws,
+                                                            generate_reqid(),
+                                                            app.measurement_id,
+                                                            action,
+                                                            chunk.payload_data,
+                                                            chunk_order=chunk.chunk_number,
+                                                            start_time_s=chunk.start_time_s,
+                                                            end_time_s=chunk.end_time_s,
+                                                            duration_s=chunk.duration_s,
+                                                            metadata=chunk.metadata)
+                        print(f"{app_num} Sent chunk {chunk.chunk_number}")
+                        renderer.set_sent(chunk.chunk_number)
+                        if app.number_chunks_sent == 0:
+                            status_queue.put_nowait(measuring_in_progress_txt)
+
+                        # Update data needed to check for completion
+                        app.number_chunks_sent += 1
+                        app.last_chunk_sent = action == 'LAST::PROCESS'
+
+                        ##### RKW make sure the next process gets queued
+                        if app.number_chunks_sent == 14:
+                            #write_shm_message(status_shm, status_event, process_limit_txt)
+                            status_queue.put_nowait(process_limit_txt)
+                            print("DEBUG: Process limit sent")
+
                         chunk_queue.task_done()
-                        break
 
-                    # Determine action and request id
-                    action = determine_action(chunk.chunk_number, chunk.number_chunks)
+                    app.step = MeasurementStep.WAITING_RESULTS
+                    print("Extraction complete, waiting for results")
 
-                    # Add data
-                    await dfxapi.Measurements.ws_add_data(ws,
-                                                        generate_reqid(),
-                                                        app.measurement_id,
-                                                        action,
-                                                        chunk.payload_data,
-                                                        chunk_order=chunk.chunk_number,
-                                                        start_time_s=chunk.start_time_s,
-                                                        end_time_s=chunk.end_time_s,
-                                                        duration_s=chunk.duration_s,
-                                                        metadata=chunk.metadata)
-                    print(f"{app_num} Sent chunk {chunk.chunk_number}")
-                    renderer.set_sent(chunk.chunk_number)
-                    if app.number_chunks_sent == 0:
-                        status_queue.put_nowait(measuring_in_progress_txt)
+                # Coroutine to receive responses using the Websocket
+                async def receive_results():
+                    num_results_received = 0
+                    valid_results = 0
+                    async for msg in ws:
+                        status, request_id, payload = dfxapi.Measurements.ws_decode(msg)
+                        if request_id == results_request_id:
+                            json_result = json.loads(payload)
+                            result = DfxSdkHelpers.json_result_to_dict(json_result)
+                            renderer.set_results(result.copy())
+                            # THIS IS WHERE THE HR COMES OUT
+                            begin_ind = payload.find("HR_IR_CONT_BPM")
+                            current_hr = payload[begin_ind + 25:begin_ind + 31]
+                            print(f"Payload:\{current_hr}/")
+                            
+                            try:
+                                int(current_hr)
+                                valid_results +=1
+                                write_shm_message(hr_shm,hr_event,current_hr)
+                                #print("the above is payload")
+                            except Exception as e:
+                                write_shm_message(hr_shm,hr_event,"None")
+                                print("No payload yet")
+                                print(e)
+                            print(f"Process {app_num}, received chunk")
+                            print(payload) if False else PP.print_sdk_result(result)
+                            
+                            num_results_received += 1
+                        # We are done if the last chunk is sent and number of results received equals number of chunks sent
+                        if (app.last_chunk_sent and num_results_received == app.number_chunks_sent) or end_event.is_set():
+                            await ws.close()
+                            print("Closing receive result")
+                            break
 
-                    # Update data needed to check for completion
-                    app.number_chunks_sent += 1
-                    app.last_chunk_sent = action == 'LAST::PROCESS'
+                    app.step = MeasurementStep.COMPLETED
+                    print("Measurement complete")
+                    # If the measurement fails one time, you should run the setup bat again.
+                    status_queue.put_nowait(error_txt+"Measurement Completed")
+                    app.step = MeasurementStep.USER_CANCELLED
 
-                    ##### RKW make sure the next process gets queued
-                    if app.number_chunks_sent == 14:
-                        #write_shm_message(status_shm, status_event, process_limit_txt)
-                        status_queue.put_nowait(process_limit_txt)
-                        print("DEBUG: Process limit sent")
 
-                    chunk_queue.task_done()
+                # Coroutine for rendering
+                async def render():
+                    if type(renderer) == NullRenderer:
+                        return
 
-                app.step = MeasurementStep.WAITING_RESULTS
-                print("Extraction complete, waiting for results")
-
-            # Coroutine to receive responses using the Websocket
-            async def receive_results():
-                num_results_received = 0
-                valid_results = 0
-                async for msg in ws:
-                    status, request_id, payload = dfxapi.Measurements.ws_decode(msg)
-                    if request_id == results_request_id:
-                        json_result = json.loads(payload)
-                        result = DfxSdkHelpers.json_result_to_dict(json_result)
-                        renderer.set_results(result.copy())
-                        # THIS IS WHERE THE HR COMES OUT
-                        begin_ind = payload.find("HR_IR_CONT_BPM")
-                        current_hr = payload[begin_ind + 25:begin_ind + 31]
-                        print(f"Payload:\{current_hr}/")
+                    cancelled = await renderer.render()
+                    cv2.destroyAllWindows()
+                    if cancelled:
+                        tracker.stop()
+                        #write_shm_message(status_shm,status_event,error_txt)
+                        status_queue.put_nowait(error_txt)
+                        print("error sent from demo")
+                        #raise ValueError("Measurement was cancelled by user.")
+                        return
+                    
+                async def end_process_listener():
+                    while True:
+                        if end_event.is_set() or app.step == MeasurementStep.USER_CANCELLED:
+                            #end_event.clear() Don't clear this, let it get cleared in the parent loop
+                            app.step = MeasurementStep.USER_CANCELLED
+                            renderer.end_render()
+                            raise ValueError(f"End event raised by user. {app_num}")
+                        await asyncio.sleep(1)
                         
-                        try:
-                            int(current_hr)
-                            valid_results +=1
-                            write_shm_message(hr_shm,hr_event,current_hr)
-                            #print("the above is payload")
-                        except Exception as e:
-                            write_shm_message(hr_shm,hr_event,"None")
-                            print("No payload yet")
+
+                # Wrap the coroutines in tasks, start them and wait till they finish
+                tasks = [
+                    asyncio.create_task(produce_chunks_coro),
+                    asyncio.create_task(send_chunks()),
+                    asyncio.create_task(receive_results()),
+                    asyncio.create_task(render()),
+                    asyncio.create_task(end_process_listener())
+                ]
+                print(f"Initialized {app_num}")
+                #write_shm_message(status_shm, status_event,initialzied_txt)
+                status_queue.put_nowait(initialzied_txt)
+                done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_EXCEPTION)
+                for p in pending:  # If there were any pending coroutines, cancel them here...
+                    p.cancel()
+                if len(pending) > 0:  # If we had pending coroutines, it means something went wrong in the 'done' ones
+                    for d in done:
+                        e = d.exception()
+                        if e is not None and type(e) != asyncio.CancelledError:
                             print(e)
-                        print(f"Process {app_num}, received chunk")
-                        print(payload) if False else PP.print_sdk_result(result)
-                        
-                        num_results_received += 1
-                    # We are done if the last chunk is sent and number of results received equals number of chunks sent
-                    if (app.last_chunk_sent and num_results_received == app.number_chunks_sent) or end_event.is_set():
-                        await ws.close()
-                        print("Closing receive result")
-                        break
-
-                app.step = MeasurementStep.COMPLETED
-                print("Measurement complete")
-                # If the measurement fails one time, you should run the setup bat again.
-                status_queue.put_nowait(error_txt+"Measurement Completed")
-                app.step = MeasurementStep.USER_CANCELLED
-
-
-            # Coroutine for rendering
-            async def render():
-                if type(renderer) == NullRenderer:
-                    return
-
-                cancelled = await renderer.render()
-                cv2.destroyAllWindows()
-                if cancelled:
-                    tracker.stop()
+                            # raise e  # Uncomment this to see a stack trace
+                    print(f"Measurement {app.measurement_id} failed")
                     #write_shm_message(status_shm,status_event,error_txt)
                     status_queue.put_nowait(error_txt)
-                    print("error sent from demo")
                     #raise ValueError("Measurement was cancelled by user.")
-                    return
-                
-            async def end_process_listener():
-                while True:
-                    if end_event.is_set() or app.step == MeasurementStep.USER_CANCELLED:
-                        #end_event.clear() Don't clear this, let it get cleared in the parent loop
-                        app.step = MeasurementStep.USER_CANCELLED
-                        renderer.end_render()
-                        raise ValueError(f"End event raised by user. {app_num}")
-                    await asyncio.sleep(1)
                     
-
-            # Wrap the coroutines in tasks, start them and wait till they finish
-            tasks = [
-                asyncio.create_task(produce_chunks_coro),
-                asyncio.create_task(send_chunks()),
-                asyncio.create_task(receive_results()),
-                asyncio.create_task(render()),
-                asyncio.create_task(end_process_listener())
-            ]
-            print(f"Initialized {app_num}")
-            #write_shm_message(status_shm, status_event,initialzied_txt)
-            status_queue.put_nowait(initialzied_txt)
-            done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_EXCEPTION)
-            for p in pending:  # If there were any pending coroutines, cancel them here...
-                p.cancel()
-            if len(pending) > 0:  # If we had pending coroutines, it means something went wrong in the 'done' ones
-                for d in done:
-                    e = d.exception()
-                    if e is not None and type(e) != asyncio.CancelledError:
-                        print(e)
-                        # raise e  # Uncomment this to see a stack trace
-                print(f"Measurement {app.measurement_id} failed")
-                #write_shm_message(status_shm,status_event,error_txt)
-                status_queue.put_nowait(error_txt)
-                #raise ValueError("Measurement was cancelled by user.")
-                
-                tracker.stop()
-                if len(tasks) > 0:
-                    for t in tasks:
-                        if not t is None:
-                            if not t.done():
-                                try:
-                                    t.cancel()
-                                except asyncio.exceptions.CancelledError:
-                                    pass
-                        else:
-                            print("Task is already done")
-                return
-            else:
-                print("ending")
+                    tracker.stop()
+                    if len(tasks) > 0:
+                        for t in tasks:
+                            if not t is None:
+                                if not t.done():
+                                    try:
+                                        t.cancel()
+                                    except asyncio.exceptions.CancelledError:
+                                        pass
+                            else:
+                                print("Task is already done")
+                    return
+                else:
+                    print("ending")
+    except e:
+        print(f"ERROR from app {app_num}: {e}")
+        pass
 
 
 def measurement_loop(config_file, camera_num, md, app_num, status_shm, hr_shm, start_event, status_event, hr_event, coordinator_shm,seconds_to_wait_before_starting, landmark_shm, landmark_event, end_event, reset_event,suppress):
