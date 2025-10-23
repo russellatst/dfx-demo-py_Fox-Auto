@@ -188,3 +188,5 @@ test _cam.py
 setup1.bat
 *.bat
 start_demo1.bat
+test_cam.py
+test_cam.py

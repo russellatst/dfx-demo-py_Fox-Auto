@@ -29,5 +29,4 @@ def show_tested_camera(dev_port):
             break
 
 if __name__ == "__main__":
-    for dev_port in range(0,3):
-        show_tested_camera(dev_port)
+    show_tested_camera(2)

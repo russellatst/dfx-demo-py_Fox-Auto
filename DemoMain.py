@@ -17,6 +17,7 @@ import pickle
 import matplotlib.pyplot as plt
 import argparse
 import queue
+from cv2_enumerate_cameras import enumerate_cameras
 
 start_str = "start"
 process_limit_str = "process_limit"
@@ -27,68 +28,19 @@ exit_txt = "exited"
 initialzied_txt = "initialized"
 message_dir = os.path.join(os.path.abspath("."), "messages")
 parser = argparse.ArgumentParser()
-parser.add_argument(
-    "-c",
-    "--camera",
-    help="Set the camera number. Default is 1", default=1, type=int)
+#parser.add_argument(
+#    "-c",
+#    "--camera",
+#    help="Set the camera number. Default is 1", default=1, type=int)
 parser.add_argument("-sdi", "--suppress_dfx_images", help="Suppress DFX Images from showing. Default: True", default=True, type=bool)
 parser.add_argument("-tts", "--time_to_start", help="The amount of time a face must be present to start the HRM. Default: 1", default=1, type=int)
 wait_for_user_time = parser.parse_args().time_to_start
 suppress = parser.parse_args().suppress_dfx_images
-_cam_num = parser.parse_args().camera # 2 is the IR, 1 is back camera, 0 is front
-cam = cv2.VideoCapture(_cam_num)
+#_cam_num = parser.parse_args().camera # 2 is the IR, 1 is back camera, 0 is front
+
 _polygon_persist_counter_max = 3
 
 ARRAY_SIZE = 512
-# Create shared memory and event flags to 2 processes
-# Status from worker to coordinator
-coordinator_worker_shm_1 = shared_memory.SharedMemory(create = True, size=ARRAY_SIZE * np.dtype(np.int32).itemsize)
-coordinator_worker_shm_2 = shared_memory.SharedMemory(create = True, size=ARRAY_SIZE * np.dtype(np.int32).itemsize)
-landmark_shm_1 = shared_memory.SharedMemory(create = True, size=ARRAY_SIZE * np.dtype(np.int32).itemsize)
-landmark_shm_2 = shared_memory.SharedMemory(create = True, size=ARRAY_SIZE * np.dtype(np.int32).itemsize)
-landmark_shm_gui = shared_memory.SharedMemory(create = True, size=ARRAY_SIZE * np.dtype(np.int32).itemsize)
-# HR data from workers to coordinator
-hr_shm_1 = shared_memory.SharedMemory(create = True, size=ARRAY_SIZE * np.dtype(np.int32).itemsize)
-hr_shm_2 = shared_memory.SharedMemory(create = True, size=ARRAY_SIZE * np.dtype(np.int32).itemsize)
-hr_shm_gui = shared_memory.SharedMemory(create = True, size=ARRAY_SIZE * np.dtype(np.int32).itemsize)
-all_shm = [coordinator_worker_shm_1,coordinator_worker_shm_2,landmark_shm_1,landmark_shm_gui,
-            hr_shm_1,hr_shm_2,hr_shm_gui]
-# Making Queues instead of shms for states
-status_queue_1 = multiprocessing.Queue()
-status_queue_2 = multiprocessing.Queue()
-
-start_event_1 = multiprocessing.Event() # This even is sent from coordinator to workers to start HR
-start_event_1.clear()
-start_event_2 = multiprocessing.Event()
-start_event_2.clear()
-end_event_1 = multiprocessing.Event()
-end_event_1.clear()
-end_event_2 = multiprocessing.Event()
-end_event_2.clear()
-hr_end_event = multiprocessing.Event()
-hr_end_event.clear()
-hr_ready_event_1 = multiprocessing.Event() # This event is sent from worker to coordinator to read a new HR
-hr_ready_event_1.clear()
-hr_ready_event_2 = multiprocessing.Event()
-hr_ready_event_2.clear()
-hr_ready_event_gui = multiprocessing.Event()
-hr_ready_event_gui.clear()
-status_event_1 = multiprocessing.Event() # This event is sent from worker to coordinator to read a new status
-status_event_1.clear()
-status_event_2 = multiprocessing.Event()
-status_event_2.clear()
-reset_active_event = multiprocessing.Event()
-reset_active_event.clear()
-landmark_event_1 = multiprocessing.Event() # This event is sent from worker to coordinator to read a new status
-landmark_event_1.clear()
-landmark_event_2 = multiprocessing.Event()
-landmark_event_2.clear()
-landmark_event_gui = multiprocessing.Event()
-landmark_event_gui.clear()
-join_event_1 = multiprocessing.Event()
-join_event_1.clear()
-join_event_2= multiprocessing.Event()
-join_event_2.clear()
 
 
 class app_state(enum.Enum):
@@ -100,7 +52,7 @@ class app_state(enum.Enum):
             ERROR = 5
 
 class HRM_Proc():
-    def __init__(self, status_queue, hr_shm, coordinator_shm, start_event, status_event, hr_event,app_num,landmark_shm,landmark_event, end_event, reset_hrm_event, suppress=True):
+    def __init__(self, status_queue, hr_shm, coordinator_shm, start_event, status_event, hr_event,app_num,landmark_shm,landmark_event, end_event, reset_hrm_event, cam_num, suppress=True):
         self.status_queue = status_queue
         self.hr_shm = hr_shm
         self.start_event = start_event
@@ -120,6 +72,7 @@ class HRM_Proc():
         self.reset_hrm_event = reset_hrm_event
         self.needs_to_be_joined = False
         self.ready_to_relaunch = False
+        self.cam_num = cam_num
     
     def run_worker(self,seconds_to_wait_before_starting):
         json_config_file = "config1.json"
@@ -128,7 +81,7 @@ class HRM_Proc():
             json_config_file = "config2.json"
         try:
             print(f"creating task {json_config_file}")
-            self.proc = Process(target=dfxdemo.dfxdemo.measurement_loop,name=str(self.app_num), args=(json_config_file,_cam_num,120, 
+            self.proc = Process(target=dfxdemo.dfxdemo.measurement_loop,name=str(self.app_num), args=(json_config_file,self.cam_num,120, 
                                                          self.app_num, self.status_queue, self.hr_shm, 
                                                          self.start_event, self.status_event, self.hr_event, 
                                                          self.coordinator_shm,seconds_to_wait_before_starting,
@@ -235,14 +188,6 @@ def set_active_process(app_num):
     print(f"New Inactive: {inactive_app}")
     return active_app, inactive_app
 
-def display_result(app_num):
-    ret, frame = cam.read()
-    c, r = 2, 15
-    r = _draw_text(f"Current Result: {app_num}", frame, (c,r))
-    cv2.imshow("Automotive Heart Rate Monitoring Demo", frame)
-    k = cv2.waitKey(1) & 0xFF
-    return k
-
 def write_shm_message(shm, event, text):
     shm.buf[:text.__len__()] = bytearray(text, 'utf-8')
     event.set()
@@ -275,9 +220,43 @@ class gui_state(enum.Enum):
         HEART_RATE_MONITORING_IN_PROGRESS = 3,
         ERROR = -1
             
-def manage_hr_process(hr_shm_gui, hr_event_gui, landmark_shm_gui, landmark_event_gui, manager_end_event,status_queue_gui,reset_active_event):
-    worker_1 = HRM_Proc(status_queue_1, hr_shm_1,coordinator_worker_shm_1,start_event_1,status_event_1,hr_ready_event_1,1,landmark_shm_gui, landmark_event_gui, end_event_1,join_event_1, suppress=suppress)
-    worker_2 = HRM_Proc(status_queue_2, hr_shm_2,coordinator_worker_shm_2,start_event_2,status_event_2,hr_ready_event_2,2,landmark_shm_gui, landmark_event_gui, end_event_2,join_event_2, suppress=suppress)
+def manage_hr_process(hr_shm_gui, hr_event_gui, landmark_shm_gui, landmark_event_gui, manager_end_event,status_queue_gui,reset_active_event,cam_num):
+    start_event_1 = multiprocessing.Event() # This even is sent from coordinator to workers to start HR
+    start_event_1.clear()
+    start_event_2 = multiprocessing.Event()
+    start_event_2.clear()
+    end_event_1 = multiprocessing.Event()
+    end_event_1.clear()
+    end_event_2 = multiprocessing.Event()
+    end_event_2.clear()
+    hr_ready_event_1 = multiprocessing.Event() # This event is sent from worker to coordinator to read a new HR
+    hr_ready_event_1.clear()
+    hr_ready_event_2 = multiprocessing.Event()
+    hr_ready_event_2.clear()
+    status_event_1 = multiprocessing.Event() # This event is sent from worker to coordinator to read a new status
+    status_event_1.clear()
+    status_event_2 = multiprocessing.Event()
+    status_event_2.clear()
+    landmark_event_1 = multiprocessing.Event() # This event is sent from worker to coordinator to read a new status
+    landmark_event_1.clear()
+    landmark_event_2 = multiprocessing.Event()
+    landmark_event_2.clear()
+    join_event_1 = multiprocessing.Event()
+    join_event_1.clear()
+    join_event_2= multiprocessing.Event()
+    join_event_2.clear()
+    # Making Queues instead of shms for states
+    status_queue_1 = multiprocessing.Queue()
+    status_queue_2 = multiprocessing.Queue()
+    # HR data from workers to coordinator
+    hr_shm_1 = shared_memory.SharedMemory(create = True, size=ARRAY_SIZE * np.dtype(np.int32).itemsize)
+    hr_shm_2 = shared_memory.SharedMemory(create = True, size=ARRAY_SIZE * np.dtype(np.int32).itemsize)
+    # Status from worker to coordinator
+    coordinator_worker_shm_1 = shared_memory.SharedMemory(create = True, size=ARRAY_SIZE * np.dtype(np.int32).itemsize)
+    coordinator_worker_shm_2 = shared_memory.SharedMemory(create = True, size=ARRAY_SIZE * np.dtype(np.int32).itemsize)
+    
+    worker_1 = HRM_Proc(status_queue_1, hr_shm_1,coordinator_worker_shm_1,start_event_1,status_event_1,hr_ready_event_1,1,landmark_shm_gui, landmark_event_gui, end_event_1,join_event_1,cam_num, suppress=suppress)
+    worker_2 = HRM_Proc(status_queue_2, hr_shm_2,coordinator_worker_shm_2,start_event_2,status_event_2,hr_ready_event_2,2,landmark_shm_gui, landmark_event_gui, end_event_2,join_event_2,cam_num, suppress=suppress)
     worker_arr = [worker_1, worker_2]
     active_app = 1
     inactive_app = 2
@@ -393,7 +372,10 @@ def manage_hr_process(hr_shm_gui, hr_event_gui, landmark_shm_gui, landmark_event
                 w.stop_process()
             print("Ending HR Manager")
             for w in worker_arr:
-                w.proc.join()
+                try:
+                    w.proc.join()
+                except:
+                    pass
             return
         # Handle face jumping
         # If face jump is found during an active measurement state: end the process and switch or end both processes
@@ -433,7 +415,7 @@ def manage_hr_process(hr_shm_gui, hr_event_gui, landmark_shm_gui, landmark_event
 
         time.sleep(1)
 
-def gui_process(hr_shm, hr_event, status_queue_gui, reset_active_event,landmark_shm_gui,landmark_event_gui,end_manager_event):
+def gui_process(cam, hr_shm, hr_event, status_queue_gui, reset_active_event,landmark_shm_gui,landmark_event_gui,end_manager_event):
     output_x = 1920
     output_y = 1080
     frame_offset_y = 20
@@ -493,7 +475,7 @@ def gui_process(hr_shm, hr_event, status_queue_gui, reset_active_event,landmark_
         #image = cv2.flip(image, 1)
         return image
     
-    def draw_frame(live_image,gstate,hr_txt, last_polygons, polygon_persist_counter):
+    def draw_frame(live_image,gstate,hr_txt, last_polygons, polygon_persist_counter, hr_historry_arr):
         
         polygons = pickle.loads(landmark_shm_gui.buf[:]) if landmark_event_gui.is_set() else None
         face_found = False
@@ -635,26 +617,18 @@ def gui_process(hr_shm, hr_event, status_queue_gui, reset_active_event,landmark_
                         print(f"New gui state -> {state.name}")
                     break
         if hr_event.is_set() and ((state == gui_state.ANALYZING) or (state == gui_state.HEART_RATE_MONITORING_IN_PROGRESS)):
-            hr_txt = get_hr_message()[0:2]
-            if hr_txt.__contains__("No"):
+            hr_txt = get_hr_message().split(".")[0]
+            if hr_txt.__contains__("N"):
                 state = gui_state.ANALYZING
             else: 
                 state = gui_state.HEART_RATE_MONITORING_IN_PROGRESS
+                #hr_history_arr[:-1] = int(hr_txt)
+                print(f"New GUI BPM set -> {hr_txt}")
                 hr_txt = str(int(np.round(int(hr_txt) * (1 - excursion_pct)))) + " - " + str(int(np.round(int(hr_txt) * (1 + excursion_pct))))
-            #np.roll(hr_history_arr, -1)
-            #hr_history_arr[:-1] = int(hr_txt)
-            print(f"New GUI BPM set -> {hr_txt}")
-            # Draw the graph
-            # plt.plot(np.arange(len(hr_history_arr)), hr_history_arr)
-            # hr_fig.canvas.draw()
-            # plot = np.fromstring(hr_fig.canvas.(), dtype=np.uint8,sep='')
-            # plot = plot.reshape(hr_fig.canvas.get_width_height()[::-1] + (3,))
-            # plot = cv2.cvtColor(plot, cv2.COLOR_RGB2BGR)
-            # display_frame[status_text_coord[0] : status_text_coord[0] + plot.shape[0],
-            #             status_text_coord[1] : status_text_coord[1] + plot.shape[1],:] = plot
+            np.roll(hr_history_arr, -1)
             
         frame = cv2.resize(frame, dsize=live_image_dim)
-        last_polygons, polygon_persist_counter, face_jumped = draw_frame(frame, state, hr_txt, last_polygons, polygon_persist_counter)
+        last_polygons, polygon_persist_counter, face_jumped = draw_frame(frame, state, hr_txt, last_polygons, polygon_persist_counter,hr_history_arr)
         if face_jumped and ((state == gui_state.ANALYZING) or (state == gui_state.HEART_RATE_MONITORING_IN_PROGRESS)):
             reset_active_event.set()
         cv2.imshow("Result", display_frame)
@@ -669,24 +643,44 @@ def gui_process(hr_shm, hr_event, status_queue_gui, reset_active_event,landmark_
     return 1
 
 if __name__ == "__main__":
+    hr_end_event = multiprocessing.Event()
+    hr_end_event.clear()
+    hr_ready_event_gui = multiprocessing.Event()
+    hr_ready_event_gui.clear()
+    reset_active_event = multiprocessing.Event()
+    reset_active_event.clear()
+    landmark_event_gui = multiprocessing.Event()
+    landmark_event_gui.clear()
     # Making Queues instead of shms for states
     status_queue_gui = multiprocessing.Queue()
+    hr_shm_gui = shared_memory.SharedMemory(create = True, size=ARRAY_SIZE * np.dtype(np.int32).itemsize)
+    landmark_shm_gui = shared_memory.SharedMemory(create = True, size=ARRAY_SIZE * np.dtype(np.int32).itemsize)
     # Establish worker processes
+    cam = None
+    cam_num = 0
+    for camera_info in enumerate_cameras(cv2.CAP_DSHOW):
+        print(f'{camera_info.index}: {camera_info.name}')
+        if camera_info.name == "OBS Virtual Camera":
+            cam = cv2.VideoCapture(camera_info.index)
+            cam_num = camera_info.index
+            print("Camera found!")
+            break
+    if cam == None:
+        print("No virtual camera found")
+        exit
+
     set_active_process(1)
-    hr_coordinator_proc = Process(target=manage_hr_process, name="hr_proc", args=(hr_shm_gui, hr_ready_event_gui,landmark_shm_gui, landmark_event_gui,hr_end_event,status_queue_gui,reset_active_event))
+    hr_coordinator_proc = Process(target=manage_hr_process, name="hr_proc", args=(hr_shm_gui, hr_ready_event_gui,landmark_shm_gui, landmark_event_gui,hr_end_event,status_queue_gui,reset_active_event,cam_num))
     hr_coordinator_proc.start()
-    gui_process(hr_shm_gui,hr_ready_event_gui,status_queue_gui,reset_active_event,landmark_shm_gui,landmark_event_gui,hr_end_event)
-    # gui_proc = Process(target=gui_process, name="gui_proc",args=(hr_shm_gui,hr_ready_event_gui,status_shm_gui,status_event_gui,landmark_shm_gui,landmark_event_gui,hr_end_event))
-    # gui_proc.start()
-    # asyncio.run(manage_hr_process(hr_shm_gui, hr_ready_event_gui,landmark_shm_gui, landmark_event_gui,hr_end_event,status_shm_gui,status_event_gui))
+    gui_process(cam, hr_shm_gui,hr_ready_event_gui,status_queue_gui,reset_active_event,landmark_shm_gui,landmark_event_gui,hr_end_event)
     print("-------ENDING DEMO---------")
-    #hr_end_event.set()
     hr_coordinator_proc.join()
     hr_coordinator_proc.close()
-    #gui_proc.kill()
-    #gui_proc.join()
-    for shm in all_shm:
-        shm.close()
-        shm.unlink()
+
+    landmark_shm_gui.close()
+    hr_shm_gui.close()
+    status_queue_gui.close()
+    landmark_shm_gui.unlink()
+    hr_shm_gui.unlink()
     exit
     
