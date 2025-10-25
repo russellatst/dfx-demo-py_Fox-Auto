@@ -1657,13 +1657,12 @@ async def register_login_select_study(config_file_num):
         else:
             print("NO JSON CREDENTIALS")
             return False
-        print(credentials["key"])
         url = yarl.URL("https://model1-api.na-east.research.deepaffex.ai").with_path("")
         dfxapi.Settings.rest_url = str(url)
         dfxapi.Settings.ws_url = str(url.with_scheme("wss"))
         config["rest_url"] = dfxapi.Settings.rest_url
         config["ws_url"] = dfxapi.Settings.ws_url
-        
+
         success = await register(config, credentials["key"])
         if success:
             save_config(config, f"config{config_file_num}.json")
