@@ -309,7 +309,7 @@ def manage_hr_process(hr_shm_gui, hr_event_gui, landmark_shm_gui, landmark_event
                 if state == coordinator_state.START_INACTIVE:
                     worker_arr[active_app - 1].reset_hrm()
                     worker_arr[inactive_app - 1].reset_hrm()
-                    worker_arr[active_app - 1].reset()
+                    #worker_arr[active_app - 1].reset()
                     state = coordinator_state.INITIALIZING
                 # If the inactive has not been start, assume it has initialized and set it to waiting for user
                 else:

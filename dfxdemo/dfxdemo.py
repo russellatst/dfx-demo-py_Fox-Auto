@@ -591,7 +591,7 @@ async def run_measurements(config_file, camera_num, md, app_num, status_queue, h
                 print(f"DFX API Status: {api_status['StatusID']} ({dfxapi.Settings.rest_url})")
 
                 return
-        print("in run a")
+        #print("in run a")
         # The commands below need a token, so make sure we are registered and/or logged in
         if not dfxapi.Settings.device_token and not dfxapi.Settings.user_token:
             print("Please register and/or login first to obtain a token")
@@ -634,7 +634,7 @@ async def run_measurements(config_file, camera_num, md, app_num, status_queue, h
                 print(f"Could not verify that profile ${profile_id} exists")
                 print(e)
                 return
-        print("in run e")
+        #print("in run e")
         # Prepare to make a measurement..
         app = AppState()
 
