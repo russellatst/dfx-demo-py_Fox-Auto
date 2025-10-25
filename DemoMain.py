@@ -148,6 +148,7 @@ class HRM_Proc():
     
     def reset_hrm(self):
         if self.proc != None:
+            print(f"RESETTING {self.app_num}!")
             self.reset_hrm_event.set()
             self.is_initialized = False
 
@@ -302,12 +303,13 @@ def manage_hr_process(hr_shm_gui, hr_event_gui, landmark_shm_gui, landmark_event
                     if not active_message_str.__contains__("Failed because no face detected"):
                         worker_arr[active_app - 1].current_state = app_state.ERROR
                         write_shm_message(hr_shm_gui,hr_event_gui,error_str)
-                        break
+                        #break
                 print(f"Restarting active app: {active_app}")
                 enable_camera_autoexposure()
                 if state == coordinator_state.START_INACTIVE:
                     worker_arr[active_app - 1].reset_hrm()
                     worker_arr[inactive_app - 1].reset_hrm()
+                    worker_arr[active_app - 1].reset()
                     state = coordinator_state.INITIALIZING
                 # If the inactive has not been start, assume it has initialized and set it to waiting for user
                 else:
@@ -357,7 +359,7 @@ def manage_hr_process(hr_shm_gui, hr_event_gui, landmark_shm_gui, landmark_event
             # Handle errors. CURRENT IMPLEMENTATION: the hrm resets itself
             elif inactive_message_str.__contains__(error_str):
                     print(f"ERROR FROM INACTIVE APP {inactive_app}")
-                    worker_arr[inactive_app - 1].current_state = app_state.ERROR
+                    #worker_arr[inactive_app - 1].current_state = app_state.ERROR
             print(f"Inactive app {inactive_app} state: {state}")
 
         if worker_arr[active_app - 1].landmark_event.is_set():
@@ -446,6 +448,7 @@ def gui_process(cam, hr_shm, hr_event, status_queue_gui, reset_active_event,land
     last_polygons = None
     polygon_persist_counter = _polygon_persist_counter_max
     excursion_pct = 0.025
+    stale_hr_counter = 0
 
     def get_hr_message():
         s = str(bytes(hr_shm.buf[:]).decode()).replace("\x00", "")
@@ -475,7 +478,7 @@ def gui_process(cam, hr_shm, hr_event, status_queue_gui, reset_active_event,land
         #image = cv2.flip(image, 1)
         return image
     
-    def draw_frame(live_image,gstate,hr_txt, last_polygons, polygon_persist_counter, hr_historry_arr):
+    def draw_frame(live_image,gstate,hr_txt, last_polygons, polygon_persist_counter, hr_historry_arr, stale_hr_counter):
         
         polygons = pickle.loads(landmark_shm_gui.buf[:]) if landmark_event_gui.is_set() else None
         face_found = False
@@ -511,6 +514,8 @@ def gui_process(cam, hr_shm, hr_event, status_queue_gui, reset_active_event,land
         yellow = (104, 232, 2444)
         white = (255, 255, 255)
         red = (0, 0, 255)
+        hr_text_color = white
+        hr_text_thickness = THICK 
         display_frame[frame_offset_y : frame_offset_y + live_image.shape[0], 
                        frame_offset_x : frame_offset_x + live_image.shape[1],
                        :] = live_image
@@ -531,6 +536,9 @@ def gui_process(cam, hr_shm, hr_event, status_queue_gui, reset_active_event,land
             color = yellow
         elif gstate == gui_state.HEART_RATE_MONITORING_IN_PROGRESS:
             status_txt = "Heart Rate Monitoring in progress"
+            if stale_hr_counter < 15:
+                hr_text_thickness = THICK * 2
+                hr_text_color = yellow
             color = green
         elif gstate == gui_state.ERROR:
             status_txt = "ERROR. Please restart."
@@ -547,7 +555,7 @@ def gui_process(cam, hr_shm, hr_event, status_queue_gui, reset_active_event,land
         # Draw the HR text
         cv2.putText(display_frame, hr_txt, 
                     bpm_text_coord,
-                    FONT, 5, white, THICK, AA)
+                    FONT, 5, hr_text_color, hr_text_thickness, AA)
 
         return last_polygons, polygon_persist_counter, face_jumped
         
@@ -620,15 +628,24 @@ def gui_process(cam, hr_shm, hr_event, status_queue_gui, reset_active_event,land
             hr_txt = get_hr_message().split(".")[0]
             if hr_txt.__contains__("N"):
                 state = gui_state.ANALYZING
+            elif hr_txt.__contains__("error"):
+                state = gui_state.ERROR
             else: 
+                stale_hr_counter = 0
                 state = gui_state.HEART_RATE_MONITORING_IN_PROGRESS
-                #hr_history_arr[:-1] = int(hr_txt)
+                if(int(hr_txt) > 200):
+                    if hr_txt[0] == 1:
+                        hr_txt = hr_txt[:3]
+                    else:
+                        hr_txt = hr_txt[:2]
+                hr_history_arr[-1] = int(hr_txt)
                 print(f"New GUI BPM set -> {hr_txt}")
                 hr_txt = str(int(np.round(int(hr_txt) * (1 - excursion_pct)))) + " - " + str(int(np.round(int(hr_txt) * (1 + excursion_pct))))
             np.roll(hr_history_arr, -1)
             
         frame = cv2.resize(frame, dsize=live_image_dim)
-        last_polygons, polygon_persist_counter, face_jumped = draw_frame(frame, state, hr_txt, last_polygons, polygon_persist_counter,hr_history_arr)
+        last_polygons, polygon_persist_counter, face_jumped = draw_frame(frame, state, hr_txt, last_polygons, polygon_persist_counter,hr_history_arr,stale_hr_counter)
+        stale_hr_counter += 1
         if face_jumped and ((state == gui_state.ANALYZING) or (state == gui_state.HEART_RATE_MONITORING_IN_PROGRESS)):
             reset_active_event.set()
         cv2.imshow("Result", display_frame)

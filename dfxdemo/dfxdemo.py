@@ -9,6 +9,7 @@ import os.path
 import platform
 import random
 import string
+import time
 
 import aiohttp
 import cv2
@@ -70,6 +71,7 @@ exit_txt = "exited"
 process_limit_reached = False
 process_limit_num = 80
 message_dir = os.path.join(os.path.abspath("."), "messages")
+credentials_path = os.path.join(os.path.abspath("."),"credentials.json")
 
 
 def write_shm_message(shm, event, text):
@@ -575,12 +577,13 @@ async def main(args):
 
 ### RKW making a slimmed down run version
 async def run_measurements(config_file, camera_num, md, app_num, status_queue, hr_shm, start_event, status_event, hr_event, coordinator_shm,seconds_to_wait_before_starting, landmark_shm, landmark_event, end_event,suppress):
+    pending = None
     try:
         # Load config
         config = load_config(config_file)
 
         first_status = True
-
+        
         # Check API status
         async with aiohttp.ClientSession(raise_for_status=True) as session:
             _, api_status = await dfxapi.General.api_status(session)
@@ -588,7 +591,7 @@ async def run_measurements(config_file, camera_num, md, app_num, status_queue, h
                 print(f"DFX API Status: {api_status['StatusID']} ({dfxapi.Settings.rest_url})")
 
                 return
-
+        print("in run a")
         # The commands below need a token, so make sure we are registered and/or logged in
         if not dfxapi.Settings.device_token and not dfxapi.Settings.user_token:
             print("Please register and/or login first to obtain a token")
@@ -605,18 +608,18 @@ async def run_measurements(config_file, camera_num, md, app_num, status_queue, h
                 #write_shm_message(status_shm, status_event,error_txt)
                 status_queue.put_nowait(error_txt)
                 return
-
+        #print("in run b")
         # Verify preconditions
         # 1. Make sure we have a valid device_token
         if not dfxapi.Settings.device_token:
             print("Please register first to obtain a device_token")
             return
-
+        #print("in run c")
         # 2. Make sure a study is selected
         if not config["selected_study"]:
             print("Please select a study first using 'study select'")
             return
-        
+        #print("in run d")
         profile_id = ""
         # 3. Check if the profile_id if selected, actually exists
         if profile_id != "":
@@ -631,7 +634,7 @@ async def run_measurements(config_file, camera_num, md, app_num, status_queue, h
                 print(f"Could not verify that profile ${profile_id} exists")
                 print(e)
                 return
-
+        print("in run e")
         # Prepare to make a measurement..
         app = AppState()
 
@@ -661,7 +664,7 @@ async def run_measurements(config_file, camera_num, md, app_num, status_queue, h
         except Exception as e:
             print(e)
             return
-
+        
         # Create DFX SDK collector (or FAIL)
         if not factory.initializeStudy(study_cfg_bytes):
             print(f"DFX factory creation failed: {factory.getLastErrorMessage()}")
@@ -857,7 +860,10 @@ async def run_measurements(config_file, camera_num, md, app_num, status_queue, h
 
                     app.step = MeasurementStep.COMPLETED
                     print("Measurement complete")
-                    # If the measurement fails one time, you should run the setup bat again.
+                    if end_event.is_set():
+                        print("End event was triggered")
+                    elif app.last_chunk_sent():
+                        print(f"app finished receiving this many chunks {num_results_received}")
                     status_queue.put_nowait(error_txt+"Measurement Completed")
                     app.step = MeasurementStep.USER_CANCELLED
 
@@ -896,49 +902,53 @@ async def run_measurements(config_file, camera_num, md, app_num, status_queue, h
                     asyncio.create_task(end_process_listener())
                 ]
                 print(f"Initialized {app_num}")
-                #write_shm_message(status_shm, status_event,initialzied_txt)
                 status_queue.put_nowait(initialzied_txt)
                 done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_EXCEPTION)
-                for p in pending:  # If there were any pending coroutines, cancel them here...
-                    p.cancel()
-                if len(pending) > 0:  # If we had pending coroutines, it means something went wrong in the 'done' ones
-                    for d in done:
-                        e = d.exception()
-                        if e is not None and type(e) != asyncio.CancelledError:
-                            print(e)
-                            # raise e  # Uncomment this to see a stack trace
-                    print(f"Measurement {app.measurement_id} failed")
-                    #write_shm_message(status_shm,status_event,error_txt)
-                    status_queue.put_nowait(error_txt)
-                    #raise ValueError("Measurement was cancelled by user.")
-                    
-                    tracker.stop()
-                    if len(tasks) > 0:
-                        for t in tasks:
-                            if not t is None:
-                                if not t.done():
-                                    try:
-                                        t.cancel()
-                                    except asyncio.exceptions.CancelledError:
-                                        pass
-                            else:
-                                print("Task is already done")
-                    return
-                else:
-                    print("ending")
-    except e:
+    except Exception as e:
         print(f"ERROR from app {app_num}: {e}")
         pass
+    finally:
+        if pending != None:
+            for p in pending:  # If there were any pending coroutines, cancel them here...
+                p.cancel()
+            if len(pending) > 0:  # If we had pending coroutines, it means something went wrong in the 'done' ones
+                for d in done:
+                    e = d.exception()
+                    if e is not None and type(e) != asyncio.CancelledError:
+                        print(f"Error in closing: {e}")
+                        # raise e  # Uncomment this to see a stack trace
+                print(f"Measurement {app.measurement_id} failed")
+                #write_shm_message(status_shm,status_event,error_txt)
+                status_queue.put_nowait(error_txt)
+                #raise ValueError("Measurement was cancelled by user.")
+                
+                tracker.stop()
+                if len(tasks) > 0:
+                    for t in tasks:
+                        if not t is None:
+                            if not t.done():
+                                try:
+                                    t.cancel()
+                                except asyncio.exceptions.CancelledError:
+                                    pass
+                        else:
+                            print("Task is already done")
+            else:
+                print("ending")
+            return
 
 
 def measurement_loop(config_file, camera_num, md, app_num, status_shm, hr_shm, start_event, status_event, hr_event, coordinator_shm,seconds_to_wait_before_starting, landmark_shm, landmark_event, end_event, reset_event,suppress):
     while True:
+        while not asyncio.run(register_login_select_study(app_num)):
+            time.sleep(1)
+        reset_event.clear()
         asyncio.run(run_measurements(config_file, camera_num, md, app_num, status_shm, hr_shm, start_event, status_event, hr_event, coordinator_shm,seconds_to_wait_before_starting, landmark_shm, landmark_event, reset_event,suppress))
-
+        reset_event.clear()
         if end_event.is_set():
             end_event.clear()
             break
-        reset_event.clear()
+        
 
 def load_config(config_file):
     config = {
@@ -996,7 +1006,7 @@ def determine_action(chunk_number, number_chunks):
 async def register(config, license_key):
     if dfxapi.Settings.device_token:
         print("Device already registered")
-        return False
+        return True
 
     try:
         async with aiohttp.ClientSession(raise_for_status=True) as session:
@@ -1059,7 +1069,7 @@ async def unregister(config):
 async def login(config, email, password):
     if dfxapi.Settings.user_token:
         print("Already logged in")
-        return False
+        return True
 
     if not dfxapi.Settings.device_token:
         print("Please register first to obtain a device_token")
@@ -1629,7 +1639,60 @@ def cmdline():
 def exec_run(config_file, camera_num, md, app_num):
     asyncio.run(run_measurements)
 
-
+async def register_login_select_study(config_file_num):
+    try:
+        print(f"{credentials_path}")
+        config = load_config(credentials_path)
+        credentials = {
+            "rest_url": "",
+            "key": "",
+            "study": "",
+            "username": "",
+            "password": ""
+        }
+        if os.path.isfile("credentials.json"):
+            with open("credentials.json", "r") as c:
+                read_config = json.loads(c.read())
+                credentials = {**credentials, **read_config}
+        else:
+            print("NO JSON CREDENTIALS")
+            return False
+        print(credentials["key"])
+        url = yarl.URL("https://model1-api.na-east.research.deepaffex.ai").with_path("")
+        dfxapi.Settings.rest_url = str(url)
+        dfxapi.Settings.ws_url = str(url.with_scheme("wss"))
+        config["rest_url"] = dfxapi.Settings.rest_url
+        config["ws_url"] = dfxapi.Settings.ws_url
+        
+        success = await register(config, credentials["key"])
+        if success:
+            save_config(config, f"config{config_file_num}.json")
+            print("Register success")
+        else:
+            print("Register unsuccessful")
+            return False
+        success = await login(config, credentials["username"], credentials["password"])
+        if success:
+            save_config(config, f"config{config_file_num}.json")
+            print("login success")
+        else:
+            print("login unsuccessful")
+            return False
+        verified, renewed, headers, new_config = await verify_renew_token(config, bool(dfxapi.Settings.user_token))
+        async with aiohttp.ClientSession(headers=headers, raise_for_status=True) as session:
+            status, response = await dfxapi.Studies.retrieve(session, credentials["study"], raise_for_status=False)
+            if status >= 400:
+                PP.print_pretty(response)
+                return False
+            s=credentials["study"]
+            print(s)
+            config["selected_study"] = credentials["study"]
+            save_config(config, f"config{config_file_num}.json")
+            print("Study select success")
+        return True
+    except Exception as e:
+        print(f"register login failed: {e}")
+        return False
 
 
 if __name__ == '__main__':

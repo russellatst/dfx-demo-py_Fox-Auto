@@ -190,3 +190,4 @@ setup1.bat
 start_demo1.bat
 test_cam.py
 test_cam.py
+credentials.json
