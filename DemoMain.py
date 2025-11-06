@@ -18,6 +18,8 @@ import matplotlib.pyplot as plt
 import argparse
 import queue
 from cv2_enumerate_cameras import enumerate_cameras
+import EntronAsUVC
+import sys
 
 start_str = "start"
 process_limit_str = "process_limit"
@@ -171,13 +173,13 @@ def _draw_text(msg, render_image, origin, fs=None, fg=None, bg=None, THICK=None)
     return origin[1] + sz[1] + baseline + 1
 
 def lock_camera_autoexposure():
-    message_dir = os.path.join(os.path.abspath("."), "PythonCapture_EntronModule")
+    message_dir = os.path.abspath(".")
     f = open(os.path.join(message_dir,"1"),"w")
     f.close()
     print(f"WROTE: aelock")
 
 def enable_camera_autoexposure():
-    message_dir = os.path.join(os.path.abspath("."), "PythonCapture_EntronModule")
+    message_dir = os.path.abspath(".")
     f = open(os.path.join(message_dir,"0"),"w")
     f.close()
     print(f"WROTE: aelock")
@@ -383,19 +385,18 @@ def manage_hr_process(hr_shm_gui, hr_event_gui, landmark_shm_gui, landmark_event
         # If face jump is found during an active measurement state: end the process and switch or end both processes
         if reset_active_event.is_set():
             reset_active_event.clear()
-            print("!!!!Face has jumped!!!!")
-            if (state == coordinator_state.ACTIVE_MEASURING):
+            if state == coordinator_state.START_INACTIVE:
+                print("Resetting both processes")
+                worker_arr[active_app - 1].reset_hrm()
+                worker_arr[inactive_app - 1].reset_hrm()
+                state = coordinator_state.INITIALIZING
+            else:
                 print("switching apps and going into a new state")
                 worker_arr[active_app - 1].start_event.clear()
                 worker_arr[active_app - 1].reset_hrm()
                 active_app, inactive_app = set_active_process(inactive_app)
                 state = coordinator_state.WAITING_FOR_USER
                 worker_arr[active_app - 1].start_event.set()
-            elif state == coordinator_state.START_INACTIVE:
-                print("Resetting both processes")
-                worker_arr[active_app - 1].reset_hrm()
-                worker_arr[inactive_app - 1].reset_hrm()
-                state = coordinator_state.INITIALIZING
 
         # Handling GUI states
         if last_state != state:
@@ -417,7 +418,7 @@ def manage_hr_process(hr_shm_gui, hr_event_gui, landmark_shm_gui, landmark_event
 
         time.sleep(1)
 
-def gui_process(cam, hr_shm, hr_event, status_queue_gui, reset_active_event,landmark_shm_gui,landmark_event_gui,end_manager_event):
+def gui_process(cam, hr_shm, hr_event, status_queue_gui, reset_active_event,landmark_shm_gui,landmark_event_gui,end_manager_event, UVC_bad_event):
     output_x = 1920
     output_y = 1080
     frame_offset_y = 20
@@ -601,8 +602,11 @@ def gui_process(cam, hr_shm, hr_event, status_queue_gui, reset_active_event,land
                     sensor_text_coord,
                     FONT, fs, (255,255,255), THICK, AA)
     # Exit Aplication information
-    cv2.putText(blank_frame, "Press 'q' to exit demo", 
-                    (10, sensor_text_coord[1]),
+    cv2.putText(blank_frame, "Press 'r' to reset", 
+                    (10, sensor_text_coord[1] - 25),
+                    FONT, fs, (50,50,50), THICK, AA)
+    cv2.putText(blank_frame, "Press 'q' to exit", 
+                    (10, sensor_text_coord[1] + 20),
                     FONT, fs, (50,50,50), THICK, AA)
     sensor_img_x_offset = int(np.mean((sensor_text_coord[0], blank_frame.shape[1])) - (sensor_image.shape[1] / 2))
     sensor_img_y_offset = sensor_text_coord[1] - sensor_image.shape[0] - frame_offset_y - 30
@@ -647,19 +651,51 @@ def gui_process(cam, hr_shm, hr_event, status_queue_gui, reset_active_event,land
         last_polygons, polygon_persist_counter, face_jumped = draw_frame(frame, state, hr_txt, last_polygons, polygon_persist_counter,hr_history_arr,stale_hr_counter)
         stale_hr_counter += 1
         if face_jumped and ((state == gui_state.ANALYZING) or (state == gui_state.HEART_RATE_MONITORING_IN_PROGRESS)):
+            print("!!!Face jump detected!!!")
             reset_active_event.set()
         cv2.imshow("Result", display_frame)
         k = cv2.waitKey(1) & 0xFF
-        if k == ord('q'):
+        if (k == ord('q')) or UVC_bad_event.is_set():
             cv2.destroyAllWindows()
             end_manager_event.set()
             cam.release()
             print("ending gui")
             return 0
+        elif k == ord('r'):
+            print("Reset requested")
+            reset_active_event.set()
         ret, frame = cam.read()
     return 1
 
 if __name__ == "__main__":
+    # Start and enumerate camera
+    UVC_good_event = multiprocessing.Event()
+    UVC_good_event.clear()
+    UVC_bad_event = multiprocessing.Event()
+    UVC_bad_event.clear()
+    UVC_end_event = multiprocessing.Event()
+    UVC_end_event.clear()
+    uvc_proc = Process(target = EntronAsUVC.make_and_stream_camera, name = "uvc_proc", args=(UVC_good_event,UVC_good_event,UVC_end_event))
+    uvc_proc.start()
+    while not UVC_good_event.is_set():
+        if UVC_bad_event.is_set():
+            print("Issue initializing camera")
+            sys.exit(0)
+        time.sleep(1)
+    UVC_good_event.clear()
+    cam = None
+    cam_num = 0
+    for camera_info in enumerate_cameras(cv2.CAP_DSHOW):
+        print(f'{camera_info.index}: {camera_info.name}')
+        if camera_info.name == "OBS Virtual Camera":
+            cam = cv2.VideoCapture(camera_info.index)
+            cam_num = camera_info.index
+            print("Camera found!")
+            break
+    if cam == None:
+        print("No virtual camera found")
+        sys.exit(0)
+
     hr_end_event = multiprocessing.Event()
     hr_end_event.clear()
     hr_ready_event_gui = multiprocessing.Event()
@@ -672,25 +708,15 @@ if __name__ == "__main__":
     status_queue_gui = multiprocessing.Queue()
     hr_shm_gui = shared_memory.SharedMemory(create = True, size=ARRAY_SIZE * np.dtype(np.int32).itemsize)
     landmark_shm_gui = shared_memory.SharedMemory(create = True, size=ARRAY_SIZE * np.dtype(np.int32).itemsize)
-    # Establish worker processes
-    cam = None
-    cam_num = 0
-    for camera_info in enumerate_cameras(cv2.CAP_DSHOW):
-        print(f'{camera_info.index}: {camera_info.name}')
-        if camera_info.name == "OBS Virtual Camera":
-            cam = cv2.VideoCapture(camera_info.index)
-            cam_num = camera_info.index
-            print("Camera found!")
-            break
-    if cam == None:
-        print("No virtual camera found")
-        exit
 
     set_active_process(1)
     hr_coordinator_proc = Process(target=manage_hr_process, name="hr_proc", args=(hr_shm_gui, hr_ready_event_gui,landmark_shm_gui, landmark_event_gui,hr_end_event,status_queue_gui,reset_active_event,cam_num))
     hr_coordinator_proc.start()
-    gui_process(cam, hr_shm_gui,hr_ready_event_gui,status_queue_gui,reset_active_event,landmark_shm_gui,landmark_event_gui,hr_end_event)
+    gui_process(cam, hr_shm_gui,hr_ready_event_gui,status_queue_gui,reset_active_event,landmark_shm_gui,landmark_event_gui,hr_end_event,UVC_bad_event)
     print("-------ENDING DEMO---------")
+    UVC_end_event.set()
+    uvc_proc.join()
+    uvc_proc.close()
     hr_coordinator_proc.join()
     hr_coordinator_proc.close()
 
@@ -699,5 +725,5 @@ if __name__ == "__main__":
     status_queue_gui.close()
     landmark_shm_gui.unlink()
     hr_shm_gui.unlink()
-    exit
+    sys.exit(0)
     
