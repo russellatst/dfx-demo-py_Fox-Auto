@@ -1,7 +1,5 @@
 ###################################################
 # Author: Russell Wong
-# TODO: add camera control
-# TODO: make user interface
 ###################################################
 import os.path
 import cv2

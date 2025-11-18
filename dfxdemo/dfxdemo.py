@@ -948,6 +948,7 @@ def measurement_loop(config_file, camera_num, md, app_num, status_shm, hr_shm, s
         if end_event.is_set():
             end_event.clear()
             break
+        time.sleep(2)
         
 
 def load_config(config_file):
